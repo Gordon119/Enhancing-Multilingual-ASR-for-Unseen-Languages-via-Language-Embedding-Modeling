@@ -34,7 +34,6 @@ def main():
     from tqdm import tqdm
     for i in tqdm(range(len(df))):
         df.loc[i, "text"] = translate(client, df.loc[i, "text"])
-        print(df.loc[i, "text"])
     df.to_csv(args.output, index=None)
 
 if __name__ == "__main__":

@@ -92,10 +92,10 @@ def encode_dataset(batch, processor, phonemize=False, backend=None, separator=No
             except Exception as e:
                 line = bytes(batch["labels"], "utf-8").decode("utf-8", "ignore")
                 batch["labels"] = processor.tokenizer(line).input_ids
-    if batch["path"].split("/")[4] == "TD":
-        batch["labels"][1] = 50260
-    else:
+    if batch["path"].split("/")[4] == "TAT":
         batch["labels"][1] = 51865
+    else:
+        batch["labels"][1] = 50260
     return batch
 
 class SavePeftModelCallback(TrainerCallback):
@@ -258,7 +258,7 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
     model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
     
     # Push to Hub    
-    peft_model_id = "Gordon119/" + f"TAT_TD-{input_arg['model_config']}-mix".replace("/", "-")
+    peft_model_id = "Gordon119/" + f"TAT_TD-{input_arg['model_config']}-mix-with-zh-TAT".replace("/", "-")
     if input_arg['specified_epoch'] is not None:
         peft_model_id += f"-epoch{str(input_arg['specified_epoch']+1)}-total{input_arg['total_epoch']}epoch"
     print(f"peft_model_id: {peft_model_id}")
@@ -340,7 +340,7 @@ def main(arg=None):
     input_arg["epoch"] = 1
     dropout = input_arg.get("dropout", 0.0)
 
-    repo_name = f"data/{input_arg['custom_set_train'].split('/')[1]}" # NOTE: specify where the processed data is located
+    repo_name = f"data/TD_TAT" # NOTE: specify where the processed data is located
     
     ############
     #  Model   #
@@ -349,10 +349,10 @@ def main(arg=None):
     processor = WhisperProcessor.from_pretrained(
         input_arg["model_config"], 
         task="transcribe", 
-        language="chinese",
+        # language="chinese",
         dropout=dropout
         )
-    special_tokens_dict = {'additional_special_tokens': ['<|tat|>', '<|td|>'] + processor.tokenizer.all_special_tokens}
+    # special_tokens_dict = {'additional_special_tokens': ['<|tat|>', '<|td|>'] + processor.tokenizer.all_special_tokens}
     special_tokens_dict = {'additional_special_tokens': ['<|tat|>'] + processor.tokenizer.all_special_tokens}
     num_added_toks = processor.tokenizer.add_special_tokens(special_tokens_dict)
     processor.save_pretrained(repo_name)
@@ -438,23 +438,8 @@ def main(arg=None):
         data_train = load_from_disk(f"{repo_name}/train.data")
         data_test = load_from_disk(f"{repo_name}/test.data")
 
-    def compute_metrics(pred):
-        # print(pred.shape)
-        pred_ids = pred.predictions
-        pred_ids = [i[i != -100] for i in pred_ids]
-        pred_str = processor.tokenizer.batch_decode(pred_ids, skip_special_tokens=True, group_tokens=True)
-        # we do not want to group tokens when computing the metrics
-        label_ids = pred.label_ids
-        label_ids = [i[i != -100] for i in label_ids]
-        label_str = processor.tokenizer.batch_decode(label_ids, skip_special_tokens=True, group_tokens=False)
-        cer = cer_cal(label_str, pred_str)
-        wer = wer_cal(label_str, pred_str)
-        pred_result = [[l, p, cer_cal([l], [p])] for l, p in zip(label_str, pred_str)]
-        nlp2.write_csv(pred_result, f"pred_{time}.csv")
-        # print 10 predict result randomly for debug
-        random.shuffle(pred_result)
-        return {"cer": cer, "wer": wer}
-
+    print("num_of_train:", len(data_train))
+    print("num_of_test:", len(data_test))
     for i in range(input_arg['total_epoch']):
         input_arg['specified_epoch'] = i
         print("===============================")
