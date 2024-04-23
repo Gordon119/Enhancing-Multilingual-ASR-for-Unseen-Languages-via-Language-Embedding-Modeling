@@ -469,6 +469,7 @@ class Whisper_Modified(WhisperForConditionalGeneration):
         encoder_outputs: Optional[Union[torch.FloatTensor, BaseModelOutput]] = None,
         generation_config: Optional[GenerationConfig] = None,
         num_segment_frames: int = 3000,
+        top_k: int = None
     ) -> torch.Tensor:
         if input_features is None and encoder_outputs is None:
             raise ValueError("You have to specify either `input_features` or `encoder_outputs`")
@@ -496,6 +497,10 @@ class Whisper_Modified(WhisperForConditionalGeneration):
         non_lang_mask[list(generation_config.lang_to_id.values())] = False
 
         logits[:, non_lang_mask] = -np.inf
+        if top_k:
+            mask = torch.ones_like(logits[0], dtype=torch.bool)
+            mask[torch.topk(logits, top_k, dim=1).indices] = False
+            logits[:, mask] = -np.inf
 
         return logits.softmax(-1)
 
@@ -516,7 +521,6 @@ class Whisper_Modified(WhisperForConditionalGeneration):
         if decoder_attention_mask is not None:
             decoder_position_ids = (decoder_attention_mask.cumsum(-1) - 1).clamp(min=0)
 
-
         if past_key_values is not None:
             past_length = past_key_values[0][0].shape[2]
 
@@ -534,6 +538,7 @@ class Whisper_Modified(WhisperForConditionalGeneration):
 
             if decoder_position_ids is not None and decoder_position_ids.shape[1] > decoder_input_ids.shape[1]:
                 decoder_position_ids = decoder_position_ids[:, remove_prefix_length:]
+
         if first:
             template = torch.tensor([[decoder_input_ids[0][0], 0, decoder_input_ids[0][1], decoder_input_ids[0][2]]]).to("cuda")
             summation = torch.zeros((1, 4 ,1280)).to("cuda")
@@ -543,6 +548,8 @@ class Whisper_Modified(WhisperForConditionalGeneration):
                     continue
                 template[0][1] = i
                 summation += self.lang_distribution[i] * self.embedding(template)
+            for i in [0, 2, 3]:
+                summation[0][i] = self.embedding(template)[0][i]
             return {
                 "encoder_outputs": encoder_outputs,
                 "past_key_values": past_key_values,
@@ -716,8 +723,6 @@ class WhisperDecoder_Modified(WhisperDecoder):
             # print("decoder:",input_ids)
             inputs_embeds = self.embed_tokens(input_ids)
             # print("decoder:",inputs_embeds)
-        else:
-            print("success")
 
 
         if self._use_flash_attention_2:
@@ -834,7 +839,7 @@ class WhisperDecoder_Modified(WhisperDecoder):
             cross_attentions=all_cross_attentions,
         )
 
-def experiment(input_arg, model, processor, data_collator, repo_name, data_train, data_test, time, output_dir):
+def experiment(input_arg, model, processor, data_collator, repo_name, data_train, data_test, time, output_dir, get_weight, top_k):
     ###################
     #     Evaluate    #
     ###################
@@ -845,15 +850,22 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
     label_list = []
     pred_list = []
     pred_results = []
-    
-    for step, batch in enumerate(tqdm(eval_dataloader)): 
+    weights = []
+    lang_code = [
+        'en', 'zh', 'de', 'es', 'ru', 'ko', 'fr', 'ja', 'pt', 'tr', 'pl', 'ca', 'nl', 'ar', 'sv', 'it', 'id', 'hi', 'fi', 'vi', 'he', 'uk', 'el', 'ms', 'cs', 'ro', 'da', 'hu', 'ta', 'no', 'th', 'ur', 'hr', 'bg', 'lt', 'la', 'mi', 'ml', 'cy', 'sk', 'te', 'fa', 'lv', 'bn', 'sr', 'az', 'sl', 'kn', 'et', 'mk', 'br', 'eu', 'is', 'hy', 'ne', 'mn', 'bs', 'kk', 'sq', 'sw', 'gl', 'mr', 'pa', 'si', 'km', 'sn', 'yo', 'so', 'af', 'oc', 'ka', 'be', 'tg', 'sd', 'gu', 'am', 'yi', 'lo', 'uz', 'fo', 'ht', 'ps', 'tk', 'nn', 'mt', 'sa', 'lb', 'my', 'bo', 'tl', 'mg', 'as', 'tt', 'haw', 'ln', 'ha', 'ba', 'jw', 'su']
+    for step, batch in enumerate(tqdm(eval_dataloader)):
+        lang_dis = model.detect_language_custom(input_features=batch["input_features"].to("cuda"), top_k=top_k).squeeze().cpu()
+        weight = torch.zeros_like(lang_dis)
+        weight[lang_dis != 0] = lang_dis[lang_dis != 0]
+        weights.append(weight[50259:50358])
+        print(processor.decode(torch.nonzero(weight)[0]), processor.decode(torch.nonzero(weight)[1]))
         with torch.no_grad():
             generated_tokens = (
-                 model.generate(
+                model.generate(
                     input_features=batch["input_features"].to("cuda"),
                     decoder_input_ids=batch["labels"][:, :3].to("cuda"),
                     max_new_tokens=255,
-                    lang_distribution=model.detect_language_custom(input_features=batch["input_features"].to("cuda")).squeeze(),
+                    lang_distribution=model.detect_language_custom(input_features=batch["input_features"].to("cuda"), top_k = top_k).squeeze(),
                     task="transcribe"
                 )
                 .cpu()
@@ -863,10 +875,8 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
             labels = batch["labels"].cpu().numpy()
             labels = np.where(labels != -100, labels, processor.tokenizer.pad_token_id)
             generated_tokens = torch.from_numpy(generated_tokens)
-            pred_str = processor.tokenizer.batch_decode(generated_tokens, skip_special_tokens=False)
-
-
-            label_str = processor.tokenizer.batch_decode(labels, skip_special_tokens=False)
+            pred_str = processor.tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+            label_str = processor.tokenizer.batch_decode(labels, skip_special_tokens=True)
 
             pred_result = [[l, p, cer_cal([l], [p])] for l, p in zip(label_str, pred_str)]
             pred_results += pred_result
@@ -874,10 +884,6 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
             pred_list += pred_str
             label_list += label_str
             pred_str = (" ").join(pred_str)
-
-            if step == 0:
-                print(pred_result)
-
         del generated_tokens, labels, batch
         gc.collect()
     nlp2.write_csv(pred_results, f'{output_dir}/pred.csv')
@@ -885,8 +891,20 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
     wer = wer_cal(label_list, pred_list)
     print("********* Evaluation Result *********")
     print(f"cer: {cer}, wer: {wer}")
-    # print(f"{lang_record}")
     print("*************************************")
+    import matplotlib.pyplot as plt
+    mean_weights = torch.mean(torch.stack(weights, 0), 0)
+    # # Plot the histogram
+    plt.bar(lang_code, mean_weights, align='center', width=1)
+    plt.xticks(fontsize=5, rotation=90)
+    plt.margins(x=0)
+    plt.xlabel('Language Code')
+    plt.ylabel('Weight')
+    plt.title('Weight Distribution')
+    # Save the plot as a PNG file
+    plt.savefig(f"{output_dir}/histogram.png", dpi=540)
+    to_save = {"weights": mean_weights}
+    torch.save(to_save, f"{output_dir}/weight.pt")
     return model
 
 
@@ -904,11 +922,12 @@ def main(arg=None):
     input_arg["tokenize_config"] = f"openai/whisper-{size}"
     input_arg["model_config"] = f"openai/whisper-{size}"
     input_arg["group_by_length"] = True
-    input_arg["cache_dir"] = "/home/gordon1109/.cache"
+    input_arg["cache_dir"] = "/tmp2/gordonzz/.cache"
     input_arg["epoch"] = 1
+
     dropout = input_arg.get("dropout", 0.0)
 
-    repo_name = f"data/{input_arg['custom_set_train'].split('/')[1]}"
+    repo_name = f"data/{input_arg['custom_set_test'].split('/')[1]}"
 
     ############
     #  Model   #
@@ -941,23 +960,23 @@ def main(arg=None):
 
     if not input_arg.get("load_cache", False):
         # data set
-        dataset = load_dataset(
-            "csv",
-            data_files=input_arg["custom_set_train"],
-            cache_dir=input_arg["cache_dir"],
-            # cache_dir=None,
-        )
-        dataset = dataset.filter(lambda e: nlp2.is_file_exist(e["path"]))
-        data_train = dataset["train"]
-        data_train = data_train.map(
-            prepare_dataset_whisper,
-            num_proc=1,
-            fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
-        )
+        # dataset = load_dataset(
+        #     "csv",
+        #     data_files=input_arg["custom_set_train"],
+        #     cache_dir=input_arg["cache_dir"],
+        #     # cache_dir=None,
+        # )
+        # dataset = dataset.filter(lambda e: nlp2.is_file_exist(e["path"]))
+        # data_train = dataset["train"]
+        # data_train = data_train.map(
+        #     prepare_dataset_whisper,
+        #     num_proc=1,
+        #     fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
+        # )
 
-        if not input_arg.get("only_eval", False):
-            data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor})
-            data_train.save_to_disk(f"{repo_name}/train.data")
+        # if not input_arg.get("only_eval", False):
+        #     data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor})
+        #     data_train.save_to_disk(f"{repo_name}/train.data")
 
         if "custom_set_test" in input_arg:
             dataset_test = load_dataset(
@@ -979,19 +998,13 @@ def main(arg=None):
         )
 
         data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor})
-        if not input_arg.get("only_eval", False):
-            data_test.save_to_disk(f"{repo_name}/test.data")
+    #     if not input_arg.get("only_eval", False):
+    #         data_test.save_to_disk(f"{repo_name}/test.data")
 
-    else:
-        print("Start loading cache dataset")
-        data_train = load_from_disk(f"{repo_name}/train.data")
-        data_test = load_from_disk(f"{repo_name}/test.data")
-    # import json
-    # weight = json.load(open("zero_shot.json"))
-    # weight = weight["td"] if repo_name.split('/')[1] == "TD_zero_shot" else weight["tat"]
-    # total = sum([i[1] for i in weight.items()])
-    # for lang, cnt in weight.items():
-    #     weight[lang] = cnt/total
+    # else:
+    #     print("Start loading cache dataset")
+    #     data_train = load_from_disk(f"{repo_name}/train.data")
+    #     data_test = load_from_disk(f"{repo_name}/test.data")
 
     model = experiment(
         input_arg,
@@ -999,13 +1012,13 @@ def main(arg=None):
         processor,
         data_collator,
         repo_name,
-        data_train,
+        None,
         data_test,
         time,
         output_dir=input_arg["output_dir"],
-        # weight=weight
+        get_weight=input_arg["get_weight"],
+        top_k=input_arg["top_k"]
     )
-
 
 if __name__ == "__main__":
     main()

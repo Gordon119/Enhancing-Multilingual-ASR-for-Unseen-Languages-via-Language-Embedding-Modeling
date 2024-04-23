@@ -329,18 +329,18 @@ def main(arg=None):
     ############
     size = input_arg["size"]
     time = datetime.now().strftime('%Y%m%d-%H%M%S')
-    input_arg["custom_set_train"] = "data/TD_TAT/train.csv" # NOTE: specify your training data here
-    input_arg["custom_set_test"] = "data/TD_TAT/test.csv" # NOTE: specify the evaluation or testing data
+    input_arg["custom_set_train"] = "data/TD_TAT_zh/train.csv" # NOTE: specify your training data here
+    input_arg["custom_set_test"] = "data/TD_TAT_zh/test.csv" # NOTE: specify the evaluation or testing data
     input_arg["tokenize_config"] = f"openai/whisper-{size}"
     input_arg["model_config"] = f"openai/whisper-{size}"
     # input_arg["output_dir"] = f"outputs/{time}"
     input_arg["group_by_length"] = True
-    input_arg["cache_dir"] = '/home/gordon1109/.cache'
+    input_arg["cache_dir"] = '/tmp2/gordonzz/.cache'
     # input_arg["load_cache"] = True # NOTE: set this to generate .data file (could cause lots of time)
     input_arg["epoch"] = 1
     dropout = input_arg.get("dropout", 0.0)
 
-    repo_name = f"data/TD_TAT" # NOTE: specify where the processed data is located
+    repo_name = f"data/TD_TAT_zh" # NOTE: specify where the processed data is located
     
     ############
     #  Model   #
