@@ -119,12 +119,8 @@ class LrRescheduleTrainer(Seq2SeqTrainer):
         super().__init__(*args, **kwargs)
         
         # Add custom attributes here
-        if specified_epoch is None:
-            self.total_epoch = 1
-            self.specified_epoch = 0
-        else:
-            self.total_epoch = total_epoch
-            self.specified_epoch = specified_epoch
+        self.total_epoch = total_epoch
+        self.specified_epoch = 0
         
     def create_scheduler(self, num_training_steps: int, optimizer: torch.optim.Optimizer = None):
         """
@@ -690,8 +686,8 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
         training_args.generation_max_length = 225
 
         trainer = LrRescheduleTrainer(
-            specified_epoch=input_arg['specified_epoch'],
-            total_epoch=input_arg['total_epoch'],
+            specified_epoch=0,
+            total_epoch=input_arg['epoch'],
             model=model,
             data_collator=data_collator,
             args=training_args,
@@ -763,7 +759,6 @@ def main(arg=None):
     input_arg["model_config"] = f"openai/whisper-{size}"
     input_arg["group_by_length"] = True
     input_arg["cache_dir"] = "~/.cache"
-    input_arg["epoch"] = 1
     dropout = input_arg.get("dropout", 0.0)
 
     top_k = input_arg.get("top_k", None)

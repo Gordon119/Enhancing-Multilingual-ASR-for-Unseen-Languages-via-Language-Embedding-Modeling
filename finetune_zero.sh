@@ -8,8 +8,7 @@ for top_k in {1..99};do
             --size $size \
             --batch 2 \
             --grad_accum 4 \
-            --specified_epoch 0 \
-            --total_epoch 5 \
+            --epoch 5 \
             --custom_set_train $repo_name/train.csv \
             --custom_set_test $repo_name/test_val.csv \
             --repo_name $repo_name \
