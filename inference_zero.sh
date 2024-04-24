@@ -1,10 +1,21 @@
-set -e
-size=large-v2
-for topk in {45..98};do
-    for file in data/ml_superb/sixth_edition/*_all.csv;do
-        dir=$(basename -- $file)
-        lang="${dir%_all.*}"
-        mkdir -p outputs/topk_$topk/${lang}_all
-        CUDA_VISIBLE_DEVICES=0 python3 zero_shot_tag.py --batch 1 --specified_epoch 0 --total_epoch 5 --custom_set_test $file --output_dir outputs/topk_$topk/${lang}_all --size $size --top_k $topk --get_weight > outputs/topk_$topk/${lang}_all/output.log
+size="large-v2"
+for top_k in {1..99};do
+    for lang in ceb zul xho gle kam nob umb pus nya nep ful nso ibo ori fil kea lug ast ckb pan orm oci kir wol luo msa mya yue ell swa ven nbl ssw tsn sot tso;do
+        output_dir=outputs/top_$top_k/$lang
+        mkdir -p $output_dir
+        repo_name=/home/gordon1109/Whisper_Experiments/data/ml_superb/sixth_edition/$lang
+        python3 zero_shot.py \
+            --size $size \
+            --batch 2 \
+            --grad_accum 4 \
+            --specified_epoch 0 \
+            --total_epoch 5 \
+            --custom_set_train $repo_name/train.csv \
+            --custom_set_test $repo_name/test_val.csv \
+            --repo_name $repo_name \
+            --output_dir $output_dir \
+            --size $size \
+            --top_k $top_k \
+            --only_eval > $output_dir/output.log    
     done
-done 
+done

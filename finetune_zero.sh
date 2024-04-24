@@ -4,7 +4,7 @@ for top_k in {1..99};do
         output_dir=outputs/top_$top_k/$lang
         mkdir -p $output_dir
         repo_name=/home/gordon1109/Whisper_Experiments/data/ml_superb/sixth_edition/$lang
-        python3 zero_shot_finetune.py \
+        python3 zero_shot.py \
             --size $size \
             --batch 2 \
             --grad_accum 4 \
