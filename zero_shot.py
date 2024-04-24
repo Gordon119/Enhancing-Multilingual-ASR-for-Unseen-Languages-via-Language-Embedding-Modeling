@@ -664,7 +664,7 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
             per_device_eval_batch_size=int(input_arg["batch"]),
             gradient_accumulation_steps=int(input_arg["grad_accum"]),
             eval_accumulation_steps=int(input_arg["grad_accum"]),
-            evaluation_strategy="epoch",
+            evaluation_strategy="no",
             save_strategy="no",
             ddp_find_unused_parameters=True,
             resume_from_checkpoint=input_arg.get("checkpoint", False),
