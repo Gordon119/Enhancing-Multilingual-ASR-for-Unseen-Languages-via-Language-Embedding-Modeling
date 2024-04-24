@@ -44,6 +44,7 @@ def parse_args(args):
     parser.add_argument("--size", type=str)
     parser.add_argument("--top_k", default=None, type=int)
     parser.add_argument("--get_weight", action="store_true")
+    parser.add_argument("--repo_name", type=str)
 
     parser.add_argument("--specified_epoch", type=int, default=None, help="For project purpose")
     parser.add_argument("--total_epoch", type=int, default=5, help="For project purpose")
