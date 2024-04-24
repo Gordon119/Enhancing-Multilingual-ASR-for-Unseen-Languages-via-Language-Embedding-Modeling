@@ -13,7 +13,6 @@ for top_k in {1..99};do
             --custom_set_test $repo_name/test_val.csv \
             --repo_name $repo_name \
             --output_dir $output_dir \
-            --size $size \
             --top_k $top_k > $output_dir/output.log    
     done
 done

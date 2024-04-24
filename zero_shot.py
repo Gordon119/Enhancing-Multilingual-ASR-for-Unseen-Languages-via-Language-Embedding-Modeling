@@ -656,6 +656,7 @@ class Whisper_Modified(WhisperForConditionalGeneration):
 def experiment(input_arg, model, processor, data_collator, repo_name, data_train, data_test, time, output_dir, get_weight, eval_only, top_k=None):
     if not eval_only:
         training_args = Seq2SeqTrainingArguments(
+            do_eval=False,
             output_dir=input_arg.get("output_dir", repo_name),
             length_column_name="lengths",
             group_by_length=input_arg["group_by_length"],
@@ -692,7 +693,7 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
             data_collator=data_collator,
             args=training_args,
             train_dataset=data_train,
-            eval_dataset=data_test,
+            # eval_dataset=data_test,
             tokenizer=processor.feature_extractor,
             callbacks=[SavePeftModelCallback],
         )
