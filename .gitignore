@@ -1,4 +1,5 @@
 outputs/
 wandb/
 data/
+__pycache__/
 .*

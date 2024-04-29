@@ -1,4 +1,5 @@
 for dir in data/ml_superb/sixth_edition/languages/*;do
+    size=large-v2
     lang=$(basename $dir)
     output_dir=outputs/all/$lang
     mkdir -p $output_dir
