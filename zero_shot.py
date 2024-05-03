@@ -56,7 +56,15 @@ def prepare_dataset_whisper(batch, feature_extractor, audio_feature_key):
         batch["labels"] = batch["text"]
     return batch
 
-def encode_dataset(batch, processor, model,top_k, phonemize=False, backend=None, separator=None):
+def get_weight(processor, model, data_train):
+    weight = torch.zeros_like(model.detect_language_custom(torch.Tensor(data_train[0]["input_ids"]).unsqueeze(0).to("cuda")))
+    for batch in data_train:
+        lang_distribution = model.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"))
+        weight += lang_distribution
+    weight /= len(data_train)
+    return weight
+
+def encode_dataset(batch, processor, model, top_k, weight=None, phonemize=False, backend=None, separator=None):
     if not isinstance(batch["labels"], list):
         if phonemize:
             with processor.as_target_processor():
@@ -72,14 +80,43 @@ def encode_dataset(batch, processor, model,top_k, phonemize=False, backend=None,
             except Exception as e:
                 line = bytes(batch["labels"], "utf-8").decode("utf-8", "ignore")
                 batch["labels"] = processor.tokenizer(line).input_ids
-        with torch.no_grad():
-            embedding=model.get_decoder().get_input_embeddings()
-            lang_distribution = model.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"), top_k=top_k)
-            token_embeddings = embedding(lang_distribution[0].nonzero()).squeeze(1)
-            lang_distribution = lang_distribution[lang_distribution.nonzero(as_tuple=True)].view(lang_distribution.shape[0], -1)
-            summation = embedding(torch.tensor(batch["labels"], dtype=torch.int).unsqueeze(0).to("cuda"))
-            summation[:,1,:] = torch.matmul(lang_distribution, token_embeddings)
-            batch["decoder_inputs_embeds"]=summation
+        if weight == None:
+            with torch.no_grad():
+                embedding=model.get_decoder().get_input_embeddings()
+                lang_distribution = model.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"), top_k=top_k)
+                # token_embeddings = embedding(lang_distribution[0].nonzero()).squeeze(1)
+                # lang_distribution = lang_distribution[lang_distribution.nonzero(as_tuple=True)].view(lang_distribution.shape[0], -1)
+                # summation = embedding(torch.tensor(batch["labels"], dtype=torch.int).unsqueeze(0).to("cuda"))
+                # summation[:,1,:] = torch.matmul(lang_distribution, token_embeddings)
+                # batch["decoder_inputs_embeds"]=summation
+                decoder_input_ids = batch["labels"]
+                template = torch.tensor(decoder_input_ids).to("cuda")
+                summation = torch.zeros((1,1280)).to("cuda")
+                lang_distribution = model.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"), top_k=top_k)
+                for i in range(lang_distribution.shape[1]):
+                    value = lang_distribution[0][i]
+                    if value.item() == 0:
+                        continue
+                    template[1] = i
+                    summation += lang_distribution[0][i] * embedding(template[1]) 
+                batch["decoder_inputs_embeds"]=embedding(torch.tensor(batch["labels"], dtype=torch.int).unsqueeze(0).to("cuda"))
+                batch["decoder_inputs_embeds"][0][1]=summation
+        else:
+            with torch.no_grad():
+                embedding=model.get_decoder().get_input_embeddings()
+                lang_distribution = weight
+                decoder_input_ids = batch["labels"]
+                template = torch.tensor(decoder_input_ids).to("cuda")
+                summation = torch.zeros((1,1280)).to("cuda")
+                lang_distribution = model.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"), top_k=top_k)
+                for i in range(lang_distribution.shape[1]):
+                    value = lang_distribution[0][i]
+                    if value.item() == 0:
+                        continue
+                    template[1] = i
+                    summation += lang_distribution[0][i] * embedding(template[1]) 
+                batch["decoder_inputs_embeds"]=embedding(torch.tensor(batch["labels"], dtype=torch.int).unsqueeze(0).to("cuda"))
+                batch["decoder_inputs_embeds"][0][1]=summation
     return batch
 
 class SavePeftModelCallback(TrainerCallback):
@@ -628,12 +665,22 @@ class Whisper_Modified(WhisperForConditionalGeneration):
         if first:
             embedding = self.get_decoder().get_input_embeddings()
             lang_distribution = self.lang_distribution
-            if len(lang_distribution.shape) < 2:
-                lang_distribution = lang_distribution.unsqueeze(0)
-            token_embeddings = embedding(lang_distribution[0].nonzero()).squeeze(1)
-            lang_distribution = lang_distribution[lang_distribution.nonzero(as_tuple=True)].view(lang_distribution.shape[0], -1)
-            summation = embedding(decoder_input_ids)
-            summation[:,1,:] = torch.matmul(lang_distribution, token_embeddings)
+            # if len(lang_distribution.shape) < 2:
+            #     lang_distribution = lang_distribution.unsqueeze(0)
+            # token_embeddings = embedding(lang_distribution[0].nonzero()).squeeze(1)
+            # lang_distribution = lang_distribution[lang_distribution.nonzero(as_tuple=True)].view(lang_distribution.shape[0], -1)
+            # summation = embedding(decoder_input_ids)
+            # summation[:,1,:] = torch.matmul(lang_distribution, token_embeddings)
+            template = torch.tensor([[decoder_input_ids[0][0], 0, decoder_input_ids[0][1], decoder_input_ids[0][2]]]).to("cuda")
+            summation = torch.zeros((1, 4 ,1280)).to("cuda")
+            for i in range(lang_distribution.shape[0]):
+                value = lang_distribution[i]
+                if value.item() == 0:
+                    continue
+                template[0][1] = i
+                summation += lang_distribution[i] * embedding(template)
+            for i in [0, 2, 3]:
+                summation[0][i] = embedding(template)[0][i]
             return {
                 "encoder_outputs": encoder_outputs,
                 "past_key_values": past_key_values,
@@ -765,6 +812,7 @@ def main(arg=None):
     top_k = input_arg.get("top_k", None)
     repo_name = input_arg.get("repo_name", None)
     eval_only = input_arg.get("only_eval", False)
+    corpus_wise = input_arg.get("corpus_wise", False)
 
     ############
     #  Model   #
@@ -805,8 +853,11 @@ def main(arg=None):
             num_proc=1,
             fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
         )
-
-        data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor, "model": model, "top_k": top_k})
+        if not corpus_wise:
+            data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor, "model": model, "top_k": top_k})
+        else:
+            weight = get_weight(processor, model, data_train)
+            data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor, "model": model, "top_k": top_k, "weight": weight})
         # data_train.save_to_disk(f"{repo_name}/train.data")
 
         if "custom_set_test" in input_arg:
@@ -828,7 +879,11 @@ def main(arg=None):
             fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
         )
 
-        data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor, "model": model, "top_k": top_k})
+        if not corpus_wise:
+            data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor, "model": model, "top_k": top_k})
+        else:
+            weight = get_weight(processor, model, data_test)
+            data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor, "model": model, "top_k": top_k, "weight": weight})
         # data_test.save_to_disk(f"{repo_name}/test.data")
 
     else:

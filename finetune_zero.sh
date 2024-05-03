@@ -1,5 +1,5 @@
 size="large-v2"
-for top_k in {1..99};do
+for top_k in {32..99};do
     for dir in data/ml_superb/sixth_edition/languages/*;do
         lang=$(basename $dir)
         output_dir=outputs/top_$top_k/$lang
