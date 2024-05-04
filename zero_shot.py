@@ -699,7 +699,7 @@ class Whisper_Modified(WhisperForConditionalGeneration):
                 "decoder_position_ids": decoder_position_ids,
             }
 
-def experiment(input_arg, model, processor, data_collator, repo_name, data_train, data_test, time, output_dir, get_weight, eval_only, top_k=None):
+def experiment(input_arg, model, processor, data_collator, repo_name, data_train, data_test, time, output_dir, weight, eval_only, top_k=None):
     if not eval_only:
         training_args = Seq2SeqTrainingArguments(
             do_eval=False,
@@ -764,7 +764,7 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
                     input_features=batch["input_features"].to("cuda"),
                     decoder_input_ids=batch["labels"][:, :3].to("cuda"),
                     max_new_tokens=255,
-                    lang_distribution=model.detect_language_custom(input_features=batch["input_features"].to("cuda"), top_k = top_k).squeeze(),
+                    lang_distribution=model.detect_language_custom(input_features=batch["input_features"].to("cuda"), top_k = top_k).squeeze() if weight == None else weight.squeeze(),
                     task="transcribe"
                 )
                 .cpu()
@@ -900,7 +900,7 @@ def main(arg=None):
         data_test,
         time,
         output_dir=input_arg["output_dir"],
-        get_weight=input_arg.get("get_weight", None),
+        weight=weight if weight != None else None,
         eval_only=eval_only,
         top_k=top_k,
     )
