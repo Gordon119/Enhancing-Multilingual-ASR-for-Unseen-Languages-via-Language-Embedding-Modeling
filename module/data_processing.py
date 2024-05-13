@@ -149,5 +149,50 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             labels = labels[:, 1:]
 
         batch["labels"] = labels
+        return batch
+
+@dataclass
+class DataCollatorWeightedSum:
+    model: Any
+    processor: Any
+    audio_feature_key: str = "input_features"
+    weight: Any = None
+    
+    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]):
+        input_features = [{"input_features": feature[self.audio_feature_key]} for feature in features]
+        batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
+
+        # batch["labels"] = torch.tensor([feature["labels"] for feature in features])
+        # batch["decoder_inputs_embeds"] = torch.tensor([feature["decoder_inputs_embeds"] for feature in features]).squeeze(0)
+        input_features = [{"input_features": feature[self.audio_feature_key]} for feature in features]
+        batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
+
+        # get the tokenized label sequences
+        label_features = [{"input_ids": feature["labels"]} for feature in features]
+        # pad the labels to max length
+        labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
+
+        # replace padding with -100 to ignore loss correctly
+        labels = labels_batch["input_ids"].masked_fill(labels_batch.attention_mask.ne(1), -100)
+
+        # if bos token is appended in previous tokenization step,
+        # cut bos token here as it's append later anyways
+        # if (labels[:, 0] == self.processor.tokenizer.bos_token_id).all().cpu().item():
+        #     labels = labels[:, 1:]
+
+        batch["labels"] = labels
+
+        with torch.no_grad():
+            embedding=self.model.get_decoder().get_input_embeddings()
+            if self.weight == None:
+                lang_distribution = self.model.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"))
+            else:
+                lang_distribution = self.weight
+
+            token_embeddings = embedding(lang_distribution[0].nonzero()).squeeze(1)
+            lang_distribution = lang_distribution[lang_distribution.nonzero(as_tuple=True)].view(lang_distribution.shape[0], -1)
+            summation = embedding(torch.tensor(batch["labels"], dtype=torch.int).unsqueeze(0).to("cuda"))
+            summation[:,1,:] = torch.matmul(lang_distribution, token_embeddings)
+            batch["weight"]=summation
 
         return batch
