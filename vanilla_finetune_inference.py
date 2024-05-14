@@ -1,6 +1,4 @@
-import wandb
 import copy
-wandb.init(mode="disabled")
 import sys
 
 import nlp2
