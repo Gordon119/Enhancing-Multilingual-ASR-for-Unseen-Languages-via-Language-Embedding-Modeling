@@ -645,10 +645,10 @@ class Whisper_Modified(WhisperForConditionalGeneration):
                 "decoder_position_ids": decoder_position_ids,
             }
 
-def experiment(input_arg, model, processor, data_collator, repo_name, data_train, data_test, time, output_dir, weight, top_k=None, test_seperate=True):
+def experiment(input_arg, model, processor, data_collator, data_train, data_test, time, output_dir, weight):
     training_args = Seq2SeqTrainingArguments(
         do_eval=False,
-        output_dir=input_arg.get("output_dir", repo_name),
+        output_dir=input_arg.get("output_dir", "."),
         length_column_name="lengths",
         group_by_length=input_arg["group_by_length"],
         per_device_train_batch_size=int(input_arg["batch"]),
@@ -701,7 +701,7 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
     label_list = []
     pred_list = []
     pred_results = []
-    if test_seperate:
+    if weight == None:
         original_model = Whisper_Modified.from_pretrained(input_arg["model_config"])
         original_config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
         original_model = get_peft_model(original_model, original_config)
@@ -715,10 +715,8 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
         with torch.no_grad():
             if weight != None:
                 lang_distribution = weight.squeeze()
-            elif test_seperate:
-                lang_distribution = original_model.detect_language_custom(input_features=batch["input_features"].to("cuda")).squeeze()
             else:
-                lang_distribution = model.detect_language_custom(input_features=batch["input_features"].to("cuda")).squeeze()
+                lang_distribution = original_model.detect_language_custom(input_features=batch["input_features"].to("cuda")).squeeze()
             generated_tokens = (
                 model.generate(
                     input_features=batch["input_features"].to("cuda"),
@@ -767,9 +765,7 @@ def main(arg=None):
     input_arg["cache_dir"] = "~/.cache"
     dropout = input_arg.get("dropout", 0.0)
 
-    repo_name = input_arg.get("repo_name", None)
     corpus_wise = input_arg.get("corpus_wise", False)
-    test_seperate = input_arg.get("test_seperate", False)
     ############
     #  Model   #
     ############
@@ -800,53 +796,40 @@ def main(arg=None):
     #  Dataset #
     ############
     weight=None
-    if not input_arg.get("load_cache", False):
-        dataset = load_dataset(
-            "csv",
-            data_files=input_arg["custom_set_train"],
-            cache_dir=input_arg["cache_dir"],
-            # cache_dir=None,
-        )
-        dataset = dataset.filter(lambda e: nlp2.is_file_exist(e["path"]))
-        data_train = dataset["train"]
-        data_train = data_train.map(
-            prepare_dataset_whisper,
-            num_proc=1,
-            fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
-        )
-        if corpus_wise:
-            weight = get_weight(processor, model, data_train)
-        data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor})
-        # data_train.save_to_disk(f"{repo_name}/train.data")
+    dataset = load_dataset(
+        "csv",
+        data_files=input_arg["custom_set_train"],
+        cache_dir=input_arg["cache_dir"],
+    )
+    dataset = dataset.filter(lambda e: nlp2.is_file_exist(e["path"]))
+    data_train = dataset["train"]
+    data_train = data_train.map(
+        prepare_dataset_whisper,
+        num_proc=1,
+        fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
+    )
+    if corpus_wise:
+        weight = get_weight(processor, model, data_train)
+    data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor})
 
-        if "custom_set_test" in input_arg:
-            dataset_test = load_dataset(
-                "csv",
-                data_files=input_arg["custom_set_test"],
-                cache_dir=input_arg["cache_dir"],
-                # cache_dir=None,
-            )
-            dataset_test = dataset_test.filter(lambda e: nlp2.is_file_exist(e["path"]))
-            data_test = dataset_test["train"]
-        else:
-            dataset = dataset["train"].train_test_split(test_size=0.1)
-            data_test = dataset["test"]
+    dataset_test = load_dataset(
+        "csv",
+        data_files=input_arg["custom_set_test"],
+        cache_dir=input_arg["cache_dir"],
+        # cache_dir=None,
+    )
+    dataset_test = dataset_test.filter(lambda e: nlp2.is_file_exist(e["path"]))
+    data_test = dataset_test["train"]
 
-        data_test = data_test.map(
-            prepare_dataset_whisper,
-            num_proc=1,
-            fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
-        )
+    data_test = data_test.map(
+        prepare_dataset_whisper,
+        num_proc=1,
+        fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
+    )
 
-        if corpus_wise:
-            weight = get_weight(processor, model, data_test)
-        data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor})
-        # data_test.save_to_disk(f"{repo_name}/test.data")
-
-    # else:
-    #     print("Start loading cache dataset")
-    #     data_train = load_from_disk(f"{repo_name}/train.data")
-    #     data_test = load_from_disk(f"{repo_name}/test.data")
+    if corpus_wise:
+        weight = get_weight(processor, model, data_test)
+    data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor})
 
 
     model = experiment(
@@ -854,13 +837,11 @@ def main(arg=None):
         model,
         processor,
         data_collator,
-        repo_name,
         data_train,
         data_test,
         time,
         output_dir=input_arg["output_dir"],
         weight=weight if weight != None else None,
-        test_seperate=test_seperate
     )
 
 if __name__ == "__main__":

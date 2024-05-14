@@ -522,7 +522,6 @@ class Whisper_Modified(WhisperForConditionalGeneration):
         decoder_attention_mask=None,
         **kwargs,
     ):
-        first = decoder_input_ids.shape[-1] == 3
         decoder_position_ids = None
         if decoder_attention_mask is not None:
             decoder_position_ids = (decoder_attention_mask.cumsum(-1) - 1).clamp(min=0)
@@ -545,7 +544,7 @@ class Whisper_Modified(WhisperForConditionalGeneration):
             if decoder_position_ids is not None and decoder_position_ids.shape[1] > decoder_input_ids.shape[1]:
                 decoder_position_ids = decoder_position_ids[:, remove_prefix_length:]
 
-        if first:
+        if past_key_values is None:
             embedding = self.get_decoder().get_input_embeddings()
             lang_distribution = self.lang_distribution
             if len(lang_distribution.shape) < 2:
@@ -560,7 +559,6 @@ class Whisper_Modified(WhisperForConditionalGeneration):
             return {
                 "encoder_outputs": encoder_outputs,
                 "past_key_values": past_key_values,
-                # "decoder_input_ids": decoder_input_ids,
                 "decoder_inputs_embeds": summation,
                 "use_cache": use_cache,
                 "decoder_attention_mask": decoder_attention_mask,
@@ -576,7 +574,7 @@ class Whisper_Modified(WhisperForConditionalGeneration):
                 "decoder_position_ids": decoder_position_ids,
             }
 
-def experiment(input_arg, model, processor, data_collator, repo_name, data_train, data_test, time, output_dir, weight):
+def experiment(input_arg, model, processor, data_collator, data_train, data_test, time, output_dir, weight):
     ###################
     #     Evaluate    #
     ###################
@@ -598,6 +596,7 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
                 model.generate(
                     input_features=batch["input_features"].to("cuda"),
                     max_new_tokens=255,
+                    decoder_input_ids=batch["labels"][:, :3].to("cuda"),
                     lang_distribution=lang_distribution,
                     task="transcribe"
                 )
@@ -642,7 +641,6 @@ def main(arg=None):
     input_arg["cache_dir"] = "~/.cache"
     dropout = input_arg.get("dropout", 0.0)
 
-    repo_name = input_arg.get("repo_name", None)
     corpus_wise = input_arg.get("corpus_wise", False)
     ############
     #  Model   #
@@ -670,65 +668,33 @@ def main(arg=None):
     #  Dataset #
     ############
     weight=None
-    if not input_arg.get("load_cache", False):
-        dataset = load_dataset(
-            "csv",
-            data_files=input_arg["custom_set_train"],
-            cache_dir=input_arg["cache_dir"],
-            # cache_dir=None,
-        )
-        dataset = dataset.filter(lambda e: nlp2.is_file_exist(e["path"]))
-        data_train = dataset["train"]
-        data_train = data_train.map(
-            prepare_dataset_whisper,
-            num_proc=1,
-            fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
-        )
-        if not corpus_wise:
-            data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor})
-        else:
-            weight = get_weight(processor, model, data_train)
-            data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor, "weight": weight})
-        # data_train.save_to_disk(f"{repo_name}/train.data")
+    dataset_test = load_dataset(
+        "csv",
+        data_files=input_arg["custom_set_test"],
+        cache_dir=input_arg["cache_dir"],
+        # cache_dir=None,
+    )
+    dataset_test = dataset_test.filter(lambda e: nlp2.is_file_exist(e["path"]))
+    data_test = dataset_test["train"]
 
-        if "custom_set_test" in input_arg:
-            dataset_test = load_dataset(
-                "csv",
-                data_files=input_arg["custom_set_test"],
-                cache_dir=input_arg["cache_dir"],
-                # cache_dir=None,
-            )
-            dataset_test = dataset_test.filter(lambda e: nlp2.is_file_exist(e["path"]))
-            data_test = dataset_test["train"]
-        else:
-            dataset = dataset["train"].train_test_split(test_size=0.1)
-            data_test = dataset["test"]
+    data_test = data_test.map(
+        prepare_dataset_whisper,
+        num_proc=1,
+        fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
+    )
 
-        data_test = data_test.map(
-            prepare_dataset_whisper,
-            num_proc=1,
-            fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
-        )
-
-        if not corpus_wise:
-            data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor})
-        else:
-            weight = get_weight(processor, model, data_test)
-            data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor})
-        # data_test.save_to_disk(f"{repo_name}/test.data")
-
+    if not corpus_wise:
+        data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor})
     else:
-        print("Start loading cache dataset")
-        # data_train = load_from_disk(f"{repo_name}/train.data")
-        # data_test = load_from_disk(f"{repo_name}/test.data")
+        weight = get_weight(processor, model, data_test)
+        data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor})
 
     model = experiment(
         input_arg,
         model,
         processor,
         data_collator,
-        repo_name,
-        data_train,
+        None,
         data_test,
         time,
         output_dir=input_arg["output_dir"],
