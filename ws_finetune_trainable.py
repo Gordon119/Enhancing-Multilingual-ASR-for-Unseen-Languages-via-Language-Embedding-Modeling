@@ -1,6 +1,4 @@
-import wandb
 import copy
-wandb.init(mode="disabled")
 import sys, os
 
 import nlp2
@@ -17,6 +15,7 @@ from datetime import datetime
 
 
 from torch.utils.data import DataLoader
+from torch import nn
 from tqdm import tqdm
 import numpy as np
 import gc
@@ -80,32 +79,6 @@ def encode_dataset(batch, processor, model, top_k, weight=None, trainable=False,
             except Exception as e:
                 line = bytes(batch["labels"], "utf-8").decode("utf-8", "ignore")
                 batch["labels"] = processor.tokenizer(line).input_ids
-        batch["weight"] = model.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"), top_k=top_k) if weight == None else weight
-        # batch["labels"] = batch["labels"][:1] + [51865] + batch["labels"][1:]
-        # # get the tokenized label sequences
-        # label_features = [{"input_ids": batch["labels"]}]
-        # # pad the labels to max length
-        # labels_batch = processor.tokenizer.pad(label_features, return_tensors="pt")
-
-        # # replace padding with -100 to ignore loss correctly
-        # labels = labels_batch["input_ids"].masked_fill(labels_batch.attention_mask.ne(1), -100)
-
-        # batch["labels"] = labels.squeeze(0)
-
-    #     with torch.no_grad():
-    #         embedding=model.get_decoder().get_input_embeddings()
-    #         if weight == None:
-    #             lang_distribution = model.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"), top_k=top_k)
-    #         else:
-    #             lang_distribution = weight
-    #         if trainable:
-    #             batch["weight"] = lang_distribution
-    #             return batch
-    #         token_embeddings = embedding(lang_distribution[0].nonzero()).squeeze(1)
-    #         lang_distribution = lang_distribution[lang_distribution.nonzero(as_tuple=True)].view(lang_distribution.shape[0], -1)
-    #         summation = embedding(torch.tensor(batch["labels"], dtype=torch.int).unsqueeze(0).to("cuda"))
-    #         summation[:,1,:] = torch.matmul(lang_distribution, token_embeddings)
-    #         batch["decoder_inputs_embeds"]=summation
     return batch
 
 class SavePeftModelCallback(TrainerCallback):
@@ -200,6 +173,14 @@ class LrRescheduleTrainer(Seq2SeqTrainer):
         return max(0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps)))
 
 class Whisper_Modified(WhisperForConditionalGeneration):
+    def __init__(self, config: WhisperConfig, weight):
+        super().__init__(config)
+        self.model = WhisperModel(config)
+        self.proj_out = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        self.weight = nn.Parameter(weight)
+
+        # Initialize weights and apply final processing
+        self.post_init()
     def forward(
         self,
         input_features: Optional[torch.FloatTensor] = None,

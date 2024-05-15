@@ -72,7 +72,6 @@ def prepare_dataset_whisper(batch, feature_extractor, audio_feature_key):
         batch["labels"] = batch["sentence"]
     else:
         batch["labels"] = batch["text"]
-    print("yes")
     return batch
 
 
@@ -181,17 +180,15 @@ class DataCollatorWeightedSum:
         #     labels = labels[:, 1:]
 
         batch["labels"] = labels
-
         with torch.no_grad():
             embedding=self.model.get_decoder().get_input_embeddings()
             if self.weight == None:
-                lang_distribution = self.model.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"))
+                lang_distribution = self.model.detect_language_custom(batch["input_features"].to("cuda"))
             else:
                 lang_distribution = self.weight
-
             token_embeddings = embedding(lang_distribution[0].nonzero()).squeeze(1)
             lang_distribution = lang_distribution[lang_distribution.nonzero(as_tuple=True)].view(lang_distribution.shape[0], -1)
-            summation = embedding(torch.tensor(batch["labels"], dtype=torch.int).unsqueeze(0).to("cuda"))
+            summation = embedding(batch["labels"].to("cuda"))
             summation[:,1,:] = torch.matmul(lang_distribution, token_embeddings)
             batch["weight"]=summation
 

@@ -78,6 +78,7 @@ def encode_dataset(batch, processor, phonemize=False, backend=None, separator=No
             except Exception as e:
                 line = bytes(batch["labels"], "utf-8").decode("utf-8", "ignore")
                 batch["labels"] = processor.tokenizer(line).input_ids
+    batch["labels"] = batch["labels"][:1] + [51865] + batch["labels"][1:]
     return batch
 
 class SavePeftModelCallback(TrainerCallback):
@@ -294,7 +295,6 @@ class Whisper_Modified(WhisperForConditionalGeneration):
             input_features=input_features, input_stride=input_stride, kwargs=kwargs
         )
         is_shortform = total_input_frames <= num_segment_frames
-        print(is_shortform)
         if is_shortform:
             # warn user of ignored inputs
             self._maybe_warn_unused_inputs(
@@ -595,7 +595,6 @@ class Whisper_Modified(WhisperForConditionalGeneration):
         decoder_attention_mask=None,
         **kwargs,
     ):
-        first = decoder_input_ids.shape[-1] == 4
         decoder_position_ids = None
         if decoder_attention_mask is not None:
             decoder_position_ids = (decoder_attention_mask.cumsum(-1) - 1).clamp(min=0)
@@ -618,7 +617,7 @@ class Whisper_Modified(WhisperForConditionalGeneration):
             if decoder_position_ids is not None and decoder_position_ids.shape[1] > decoder_input_ids.shape[1]:
                 decoder_position_ids = decoder_position_ids[:, remove_prefix_length:]
 
-        if first:
+        if past_key_values is None:
             embedding = self.get_decoder().get_input_embeddings()
             lang_distribution = self.lang_distribution
             if len(lang_distribution.shape) < 2:
@@ -669,10 +668,11 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
         warmup_steps=input_arg.get("warmup_steps", 100),
         save_total_limit=input_arg.get("save_total_limit", 3),
         push_to_hub=False,
-        report_to="all",
+        report_to="none",
         weight_decay=input_arg.get("weight_decay", 0.02),
         remove_unused_columns=False,
         label_names=["labels"],
+        dataloader_pin_memory=False
     )
 
     training_args.generation_max_length = 225
@@ -721,6 +721,7 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
                 model.generate(
                     input_features=batch["input_features"].to("cuda"),
                     max_new_tokens=255,
+                    decoder_input_ids=batch["labels"][:, :4].to("cuda"),
                     lang_distribution=lang_distribution,
                     task="transcribe"
                 )
