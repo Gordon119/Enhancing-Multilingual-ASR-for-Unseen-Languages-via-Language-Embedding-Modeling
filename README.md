@@ -1,5 +1,11 @@
 # Weghted Sum Embedding as Initialization for Inference and Finetuning of Whisper
 
+## Installation
+Use the exact version of the packages in the ``requirements.txt``.
+```
+pip install -r requirements.txt
+```
+
 ## Data Format
 The data format follows ml_superb. Each instance contains the path to the wav file and the text.
 For example,
