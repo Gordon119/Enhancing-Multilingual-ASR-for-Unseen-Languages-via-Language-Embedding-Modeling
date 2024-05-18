@@ -11,7 +11,7 @@ path,text
 ...
 ```
 
-If you need the whipser-unseen version of ml_superb, please contact me.
+If you need the whisper-unseen version of ml_superb, please contact me.
 ## Inference
 Use the script ``ws_inference.py``. The arguments are:
 - batch: batch size.
@@ -25,14 +25,20 @@ Refer to ``ws_inference.sh`` for my usage.
 There are two settings.
 ### Fix Embedding Layer
 Use the script ``ws_finetune_untrainable.py``. The arguments are:
-- batch: batch size.
 - grad_accm: gradient accumulation.
 - epoch: training epoch (currently I have not implemented earlystopping)
 - custom_train_set: the csv path of the training data.
-- custom_test_set: the csv path of the testing data.
-- size: the whisper config (``large-v2``, ``large-v3``)
-- corpus_wise: All the weighted sum embeddings will be averaged to obtain a shared embedding.
-- output_dir: the location to save the output log (containing CER and WER results) and prediction.
 
 Refer to ``ws_finetune_untrainable.sh`` for my usage.
-### Trainable Embedding Layer (Developing)
+### Trainable Embedding Layer
+Use the script ``ws_finetune_untrainable.py``.
+The embedding layer and the weight is trainable in this case. The weight is initialized by the corpus-wise averaged weight, so the default behavior is ``corpus-wise`` here.
+Other arguments are the same with the former ones.
+
+Refer to ``ws_finetune_trainable.sh`` for my usage.
+
+## TODO
+- [ ] Error occurs for some ml-superb language.
+- [ ] Try this with different seeds.
+- [ ] Add vanilla inference script.
+- [ ] [optional] Hyperparamter search. 
