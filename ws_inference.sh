@@ -1,6 +1,6 @@
 # utterance wise
-exp_name=$1
-for dir in data/ml_superb/sixth_edition/languages/*;do
+exp_name="inference_utterance_wise"
+for dir in data/ml_superb/sixth_edition/languages/mya data/ml_superb/sixth_edition/languages/ori data/ml_superb/sixth_edition/languages/pan;do
     size=large-v2
     lang=$(basename $dir)
     if [ $lang == "all" ]; then
@@ -16,18 +16,19 @@ for dir in data/ml_superb/sixth_edition/languages/*;do
 done
 
 # corpus wise
-# exp_name=$1
-# for dir in data/ml_superb/sixth_edition/languages/*;do
-#     size=large-v2
-#     lang=$(basename $dir)
-#     if [ $lang == "all" ]; then
-#         continue
-#     fi
-#     output_dir=outputs/$exp_name/$lang
-#     mkdir -p $output_dir
-#     python3 ws_inference.py \
-#         --size $size \
-#         --custom_set_test $dir/test_val.csv \
-#         --corpus_wise \
-#         --output_dir $output_dir > $output_dir/output.log
-# done
+exp_name="inference_corpus_wise"
+for dir in data/ml_superb/sixth_edition/languages/mya data/ml_superb/sixth_edition/languages/ori data/ml_superb/sixth_edition/languages/pan;do
+    size=large-v2
+    lang=$(basename $dir)
+    if [ $lang == "all" ]; then
+        continue
+    fi
+    output_dir=outputs/$exp_name/$lang
+    mkdir -p $output_dir
+    python3 ws_inference.py \
+        --size $size \
+        --batch 1 \
+        --custom_set_test $dir/test_val.csv \
+        --corpus_wise \
+        --output_dir $output_dir > $output_dir/output.log
+done

@@ -163,53 +163,7 @@ class LrRescheduleTrainer(Seq2SeqTrainer):
             return float(current_step) / float(max(1, num_warmup_steps))
         return max(0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps)))
 
-def experiment(input_arg, model, processor, data_collator, repo_name, data_train, data_test, time, output_dir, eval_only):
-    if not eval_only:
-        training_args = Seq2SeqTrainingArguments(
-            do_eval=False,
-            output_dir=input_arg.get("output_dir", repo_name),
-            length_column_name="lengths",
-            group_by_length=input_arg["group_by_length"],
-            per_device_train_batch_size=int(input_arg["batch"]),
-            per_device_eval_batch_size=int(input_arg["batch"]),
-            gradient_accumulation_steps=int(input_arg["grad_accum"]),
-            eval_accumulation_steps=int(input_arg["grad_accum"]),
-            evaluation_strategy="no",
-            save_strategy="no",
-            ddp_find_unused_parameters=True,
-            resume_from_checkpoint=input_arg.get("checkpoint", False),
-            overwrite_output_dir=input_arg.get("overwrite_output_dir", False),
-            greater_is_better=False,
-            metric_for_best_model="cer",
-            num_train_epochs=input_arg.get("epoch", 5),
-            fp16=True,
-            logging_steps=input_arg.get("logging_steps", 10),
-            learning_rate=input_arg.get("learning_rate", 4.7e-5),
-            warmup_steps=input_arg.get("warmup_steps", 100),
-            save_total_limit=input_arg.get("save_total_limit", 3),
-            push_to_hub=False,
-            report_to="all",
-            weight_decay=input_arg.get("weight_decay", 0.02),
-            remove_unused_columns=False,
-            label_names=["labels"],
-        )
-
-        training_args.generation_max_length = 225
-
-        trainer = LrRescheduleTrainer(
-            specified_epoch=0,
-            total_epoch=input_arg['epoch'],
-            model=model,
-            data_collator=data_collator,
-            args=training_args,
-            train_dataset=data_train,
-            # eval_dataset=data_test,
-            tokenizer=processor.feature_extractor,
-            callbacks=[SavePeftModelCallback],
-        )
-        model.config.use_cache = False  
-
-        trainer.train()
+def experiment(input_arg, model, processor, data_collator, repo_name, data_train, data_test, time, output_dir):
     ###################
     #     Evaluate    #
     ###################
@@ -226,7 +180,6 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
             generated_tokens = (
                 model.generate(
                     input_features=batch["input_features"].to("cuda"),
-                    decoder_input_ids=batch["labels"][:, :3].to("cuda"),
                     max_new_tokens=255,
                     task="transcribe"
                 )
@@ -272,7 +225,6 @@ def main(arg=None):
     dropout = input_arg.get("dropout", 0.0)
 
     repo_name = input_arg.get("repo_name", None)
-    only_eval = input_arg.get("only_eval", False)
     ############
     #  Model   #
     ############
@@ -281,13 +233,13 @@ def main(arg=None):
         input_arg["model_config"], task="transcribe", dropout=dropout, language=None
     )
     audio_feature_key = "input_ids"
+
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor, audio_feature_key=audio_feature_key)
 
     # load from base model
     model = WhisperForConditionalGeneration.from_pretrained(input_arg["model_config"])
     config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
     model = get_peft_model(model, config)
-       
     model = model.to("cuda")
     
     model.config.forced_decoder_ids = None
@@ -298,50 +250,42 @@ def main(arg=None):
     ############
     #  Dataset #
     ############
-    if not input_arg.get("load_cache", False):
-        dataset = load_dataset(
+    dataset = load_dataset(
+        "csv",
+        data_files=input_arg["custom_set_train"],
+        cache_dir=input_arg["cache_dir"],
+        # cache_dir=None,
+    )
+    dataset = dataset.filter(lambda e: nlp2.is_file_exist(e["path"]))
+    data_train = dataset["train"]
+    data_train = data_train.map(
+        prepare_dataset_whisper,
+        num_proc=1,
+        fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
+    )
+
+    data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor})
+
+    if "custom_set_test" in input_arg:
+        dataset_test = load_dataset(
             "csv",
-            data_files=input_arg["custom_set_train"],
+            data_files=input_arg["custom_set_test"],
             cache_dir=input_arg["cache_dir"],
             # cache_dir=None,
         )
-        dataset = dataset.filter(lambda e: nlp2.is_file_exist(e["path"]))
-        data_train = dataset["train"]
-        data_train = data_train.map(
-            prepare_dataset_whisper,
-            num_proc=1,
-            fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
-        )
-
-        data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor})
-        # data_train.save_to_disk(f"{repo_name}/train.data")
-
-        if "custom_set_test" in input_arg:
-            dataset_test = load_dataset(
-                "csv",
-                data_files=input_arg["custom_set_test"],
-                cache_dir=input_arg["cache_dir"],
-                # cache_dir=None,
-            )
-            dataset_test = dataset_test.filter(lambda e: nlp2.is_file_exist(e["path"]))
-            data_test = dataset_test["train"]
-        else:
-            dataset = dataset["train"].train_test_split(test_size=0.1)
-            data_test = dataset["test"]
-
-        data_test = data_test.map(
-            prepare_dataset_whisper,
-            num_proc=1,
-            fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
-        )
-
-        data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor})
-        # data_test.save_to_disk(f"{repo_name}/test.data")
-
+        dataset_test = dataset_test.filter(lambda e: nlp2.is_file_exist(e["path"]))
+        data_test = dataset_test["train"]
     else:
-        print("Start loading cache dataset")
-        # data_train = load_from_disk(f"{repo_name}/train.data")
-        # data_test = load_from_disk(f"{repo_name}/test.data")
+        dataset = dataset["train"].train_test_split(test_size=0.1)
+        data_test = dataset["test"]
+
+    data_test = data_test.map(
+        prepare_dataset_whisper,
+        num_proc=1,
+        fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
+    )
+
+    data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor})
 
     model = experiment(
         input_arg,
@@ -353,7 +297,6 @@ def main(arg=None):
         data_test,
         time,
         output_dir=input_arg["output_dir"],
-        eval_only=only_eval
     )
 
 if __name__ == "__main__":

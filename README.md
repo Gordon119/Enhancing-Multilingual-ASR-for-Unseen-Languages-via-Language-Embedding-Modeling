@@ -44,7 +44,5 @@ Other arguments are the same with the former ones.
 Refer to ``ws_finetune_trainable.sh`` for my usage.
 
 ## TODO
-- [ ] Error occurs for some ml-superb language.
 - [ ] Try this with different seeds.
 - [ ] Add vanilla inference script.
-- [ ] [optional] Hyperparamter search. 

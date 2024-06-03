@@ -80,6 +80,8 @@ def encode_dataset(batch, processor, phonemize=False, backend=None, separator=No
                 line = bytes(batch["labels"], "utf-8").decode("utf-8", "ignore")
                 batch["labels"] = processor.tokenizer(line).input_ids
     batch["labels"] = batch["labels"][:1] + [51865] + batch["labels"][1:]
+    if len(batch["labels"]) > 448:
+        batch["labels"] = batch["labels"][:448]
     return batch
 
 class SavePeftModelCallback(TrainerCallback):
@@ -406,7 +408,6 @@ def main(arg=None):
     input_arg["cache_dir"] = "~/.cache"
     dropout = input_arg.get("dropout", 0.0)
 
-    corpus_wise = input_arg.get("corpus_wise", False)
     ############
     #  Model   #
     ############
@@ -449,8 +450,7 @@ def main(arg=None):
         num_proc=1,
         fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
     )
-    if corpus_wise:
-        weight_train = get_weight(processor, model, data_train)
+    weight_train = get_weight(processor, model, data_train)
     data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor})
 
     dataset_test = load_dataset(
