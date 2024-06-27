@@ -1,6 +1,7 @@
 outputs/
 wandb/
 data/
-*/__pycache__/
+__pycache__/
+*.pyc
 .*
 *~

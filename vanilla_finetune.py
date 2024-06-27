@@ -35,6 +35,8 @@ from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from peft import LoraConfig, PeftModel, LoraModel, LoraConfig, get_peft_model, PeftConfig
 from peft import prepare_model_for_int8_training
 
+NEW_TOKEN_TO_ID = {'ast': 51865, 'ceb': 51866, 'ckb': 51867, 'fil': 51868, 'ful': 51869, 'gle': 51870, 'ibo': 51871, 'kam': 51872, 'kea': 51873, 'kir': 51874, 'lug': 51875, 'luo': 51876, 'msa': 51877, 'mya': 51878, 'nbl': 51879, 'nso': 51880, 'nya': 51881, 'ori': 51882, 'orm': 51883, 'pan': 51884, 'pus': 51885, 'sot': 51886, 'ssw': 51887, 'tsn': 51888, 'tso': 51889, 'umb': 51890, 'ven': 51891, 'wol': 51892, 'xho': 51893, 'zul': 51894}
+
 def prepare_dataset_whisper(batch, feature_extractor, audio_feature_key):
     path = batch["path"]
     speech, sampling_rate = torchaudio.load(path)
@@ -54,6 +56,14 @@ def prepare_dataset_whisper(batch, feature_extractor, audio_feature_key):
         batch["labels"] = batch["text"]
     return batch
 
+def get_weight(processor, model, data_train):
+    weight = torch.zeros_like(model.detect_language_custom(torch.Tensor(data_train[0]["input_ids"]).unsqueeze(0).to("cuda")))
+    for batch in data_train:
+        lang_distribution = model.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"))
+        weight += lang_distribution
+    weight /= len(data_train)
+    return weight
+
 def encode_dataset(batch, processor, phonemize=False, backend=None, separator=None):
     if not isinstance(batch["labels"], list):
         if phonemize:
@@ -70,6 +80,9 @@ def encode_dataset(batch, processor, phonemize=False, backend=None, separator=No
             except Exception as e:
                 line = bytes(batch["labels"], "utf-8").decode("utf-8", "ignore")
                 batch["labels"] = processor.tokenizer(line).input_ids
+    lang=batch["path"].split("/")[-3]
+    lang_id=NEW_TOKEN_TO_ID[lang]
+    batch["labels"] = batch["labels"][:1] + [lang_id] + batch["labels"][1:]
     if len(batch["labels"]) > 448:
         batch["labels"] = batch["labels"][:448]
     return batch
@@ -165,7 +178,53 @@ class LrRescheduleTrainer(Seq2SeqTrainer):
             return float(current_step) / float(max(1, num_warmup_steps))
         return max(0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps)))
 
-def experiment(input_arg, model, processor, data_collator, repo_name, data_train, data_test, time, output_dir):
+def experiment(input_arg, model, processor, data_collator, data_train, data_test, time, output_dir, eval_only):
+    if not eval_only:
+        training_args = Seq2SeqTrainingArguments(
+            do_eval=False,
+            output_dir=input_arg.get("output_dir", "."),
+            length_column_name="lengths",
+            group_by_length=input_arg["group_by_length"],
+            per_device_train_batch_size=int(input_arg["batch"]),
+            per_device_eval_batch_size=int(input_arg["batch"]),
+            gradient_accumulation_steps=int(input_arg["grad_accum"]),
+            eval_accumulation_steps=int(input_arg["grad_accum"]),
+            evaluation_strategy="no",
+            save_strategy="no",
+            ddp_find_unused_parameters=True,
+            resume_from_checkpoint=input_arg.get("checkpoint", False),
+            overwrite_output_dir=input_arg.get("overwrite_output_dir", False),
+            greater_is_better=False,
+            metric_for_best_model="cer",
+            num_train_epochs=input_arg.get("epoch", 5),
+            fp16=True,
+            logging_steps=input_arg.get("logging_steps", 10),
+            learning_rate=input_arg.get("learning_rate", 4.7e-5),
+            warmup_steps=input_arg.get("warmup_steps", 100),
+            save_total_limit=input_arg.get("save_total_limit", 3),
+            push_to_hub=False,
+            report_to="none",
+            weight_decay=input_arg.get("weight_decay", 0.02),
+            remove_unused_columns=False,
+            label_names=["labels"],
+        )
+
+        training_args.generation_max_length = 225
+
+        trainer = LrRescheduleTrainer(
+            specified_epoch=0,
+            total_epoch=input_arg['epoch'],
+            model=model,
+            data_collator=data_collator,
+            args=training_args,
+            train_dataset=data_train,
+            # eval_dataset=data_test,
+            tokenizer=processor.feature_extractor,
+            callbacks=[SavePeftModelCallback],
+        )
+        model.config.use_cache = False  
+
+        trainer.train()
     ###################
     #     Evaluate    #
     ###################
@@ -176,13 +235,13 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
     label_list = []
     pred_list = []
     pred_results = []
-
     for step, batch in enumerate(tqdm(eval_dataloader)):
         with torch.no_grad():
             generated_tokens = (
                 model.generate(
                     input_features=batch["input_features"].to("cuda"),
                     max_new_tokens=255,
+                    decoder_input_ids=batch["labels"][:, :4].to("cuda"),
                     task="transcribe"
                 )
                 .cpu()
@@ -226,7 +285,7 @@ def main(arg=None):
     input_arg["cache_dir"] = "~/.cache"
     dropout = input_arg.get("dropout", 0.0)
 
-    repo_name = input_arg.get("repo_name", None)
+    only_eval = input_arg.get("only_eval", False)
     ############
     #  Model   #
     ############
@@ -235,6 +294,8 @@ def main(arg=None):
         input_arg["model_config"], task="transcribe", dropout=dropout, language=None
     )
     audio_feature_key = "input_ids"
+    special_tokens_dict = {'additional_special_tokens': ['<|ast|>', '<|ceb|>', '<|ckb|>', '<|fil|>', '<|ful|>', '<|gle|>', '<|ibo|>', '<|kam|>', '<|kea|>', '<|kir|>', '<|lug|>', '<|luo|>', '<|msa|>', '<|mya|>', '<|nbl|>', '<|nso|>', '<|nya|>', '<|ori|>', '<|orm|>', '<|pan|>', '<|pus|>', '<|sot|>', '<|ssw|>', '<|tsn|>', '<|tso|>', '<|umb|>', '<|ven|>', '<|wol|>', '<|xho|>', '<|zul|>'] + processor.tokenizer.all_special_tokens}
+    num_added_toks = processor.tokenizer.add_special_tokens(special_tokens_dict)
 
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor, audio_feature_key=audio_feature_key)
 
@@ -242,6 +303,7 @@ def main(arg=None):
     model = WhisperForConditionalGeneration.from_pretrained(input_arg["model_config"])
     config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
     model = get_peft_model(model, config)
+    model.resize_token_embeddings(len(processor.tokenizer))   
     model = model.to("cuda")
     
     model.config.forced_decoder_ids = None
@@ -252,11 +314,11 @@ def main(arg=None):
     ############
     #  Dataset #
     ############
+    weight=None
     dataset = load_dataset(
         "csv",
         data_files=input_arg["custom_set_train"],
         cache_dir=input_arg["cache_dir"],
-        # cache_dir=None,
     )
     dataset = dataset.filter(lambda e: nlp2.is_file_exist(e["path"]))
     data_train = dataset["train"]
@@ -265,28 +327,22 @@ def main(arg=None):
         num_proc=1,
         fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
     )
-
     data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor})
 
-    if "custom_set_test" in input_arg:
-        dataset_test = load_dataset(
-            "csv",
-            data_files=input_arg["custom_set_test"],
-            cache_dir=input_arg["cache_dir"],
-            # cache_dir=None,
-        )
-        dataset_test = dataset_test.filter(lambda e: nlp2.is_file_exist(e["path"]))
-        data_test = dataset_test["train"]
-    else:
-        dataset = dataset["train"].train_test_split(test_size=0.1)
-        data_test = dataset["test"]
+    dataset_test = load_dataset(
+        "csv",
+        data_files=input_arg["custom_set_test"],
+        cache_dir=input_arg["cache_dir"],
+        # cache_dir=None,
+    )
+    dataset_test = dataset_test.filter(lambda e: nlp2.is_file_exist(e["path"]))
+    data_test = dataset_test["train"]
 
     data_test = data_test.map(
         prepare_dataset_whisper,
         num_proc=1,
         fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
     )
-
     data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor})
 
     model = experiment(
@@ -294,11 +350,11 @@ def main(arg=None):
         model,
         processor,
         data_collator,
-        repo_name,
         data_train,
         data_test,
         time,
         output_dir=input_arg["output_dir"],
+        eval_only=only_eval,
     )
 
 if __name__ == "__main__":

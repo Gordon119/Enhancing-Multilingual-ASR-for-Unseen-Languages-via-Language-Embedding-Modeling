@@ -46,6 +46,7 @@ def parse_args(args):
     parser.add_argument("--corpus_wise", action="store_true")
     parser.add_argument("--test_seperate", action="store_true")
     parser.add_argument("--trainable", action="store_true")
+    parser.add_argument("--all", action="store_true")
     parser.add_argument("--repo_name", type=str)
 
     parser.add_argument("--specified_epoch", type=int, default=None, help="For project purpose")

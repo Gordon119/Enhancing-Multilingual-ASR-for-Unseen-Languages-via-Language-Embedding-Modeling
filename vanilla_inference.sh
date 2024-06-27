@@ -1,13 +1,10 @@
-exp_name=$1
+exp_name="zero_shot_vanilla_plus_all"
 for dir in data/ml_superb/sixth_edition/languages/*;do
     size=large-v2
     lang=$(basename $dir)
-    if [ $lang == "all" ]; then
-        continue
-    fi
     output_dir=outputs/$exp_name/$lang
     mkdir -p $output_dir
-    CUDA_VISIBLE_DEVICES=1 python3 vanilla_inference.py \
+    python3 vanilla_inference.py \
         --size $size \
         --batch 1 \
         --custom_set_train $dir/train.csv \

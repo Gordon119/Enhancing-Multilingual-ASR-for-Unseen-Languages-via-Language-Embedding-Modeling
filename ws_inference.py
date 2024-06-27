@@ -78,6 +78,8 @@ def encode_dataset(batch, processor, phonemize=False, backend=None, separator=No
             except Exception as e:
                 line = bytes(batch["labels"], "utf-8").decode("utf-8", "ignore")
                 batch["labels"] = processor.tokenizer(line).input_ids
+    if len(batch["labels"]) > 448:
+        batch["labels"] = batch["labels"][:448]
     return batch
 
 class SavePeftModelCallback(TrainerCallback):

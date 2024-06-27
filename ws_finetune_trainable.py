@@ -36,6 +36,8 @@ from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from peft import LoraConfig, PeftModel, LoraModel, LoraConfig, get_peft_model, PeftConfig
 from peft import prepare_model_for_int8_training
 
+NEW_TOKEN_TO_ID = {'ast': 51865, 'ceb': 51866, 'ckb': 51867, 'fil': 51868, 'ful': 51869, 'gle': 51870, 'ibo': 51871, 'kam': 51872, 'kea': 51873, 'kir': 51874, 'lug': 51875, 'luo': 51876, 'msa': 51877, 'mya': 51878, 'nbl': 51879, 'nso': 51880, 'nya': 51881, 'ori': 51882, 'orm': 51883, 'pan': 51884, 'pus': 51885, 'sot': 51886, 'ssw': 51887, 'tsn': 51888, 'tso': 51889, 'umb': 51890, 'ven': 51891, 'wol': 51892, 'xho': 51893, 'zul': 51894}
+
 def prepare_dataset_whisper(batch, feature_extractor, audio_feature_key):
     path = batch["path"]
     speech, sampling_rate = torchaudio.load(path)
@@ -55,15 +57,28 @@ def prepare_dataset_whisper(batch, feature_extractor, audio_feature_key):
         batch["labels"] = batch["text"]
     return batch
 
-def get_weight(processor, model, data_train):
-    weight = torch.zeros_like(model.detect_language_custom(torch.Tensor(data_train[0]["input_ids"]).unsqueeze(0).to("cuda")))
-    for batch in data_train:
-        lang_distribution = model.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"))
-        weight += lang_distribution
-    weight /= len(data_train)
-    return weight
+def get_weight(processor, model, data_train, all=False):
+    weight = torch.zeros_like(model.detect_language_custom(torch.Tensor(data_train[0]["input_ids"]).unsqueeze(0).to("cuda"), all=all))
+    if all:
+        weights={}
+        for key, value in NEW_TOKEN_TO_ID.items():
+            weights[value] = [weight, 0]
+        for batch in tqdm(data_train):
+            lang_distribution = model.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"), all=True)
+            weights[batch["labels"][1]][0] += lang_distribution
+            weights[batch["labels"][1]][1] += 1
+        for key, value in NEW_TOKEN_TO_ID.items():
+            weights[value] = weights[value][0] / weights[value][1]
+            # weights[value] = weights[value][0] / 1
+        return weights
+    else:
+        for batch in data_train:
+            lang_distribution = model.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"))
+            weight += lang_distribution
+        weight /= len(data_train)
+        return weight
 
-def encode_dataset(batch, processor, phonemize=False, backend=None, separator=None):
+def encode_dataset(batch, processor, all=False, phonemize=False, backend=None, separator=None):
     if not isinstance(batch["labels"], list):
         if phonemize:
             with processor.as_target_processor():
@@ -79,7 +94,12 @@ def encode_dataset(batch, processor, phonemize=False, backend=None, separator=No
             except Exception as e:
                 line = bytes(batch["labels"], "utf-8").decode("utf-8", "ignore")
                 batch["labels"] = processor.tokenizer(line).input_ids
-    batch["labels"] = batch["labels"][:1] + [51865] + batch["labels"][1:]
+    if all:
+        lang=batch["path"].split("/")[-3]
+        lang_id=NEW_TOKEN_TO_ID[lang]
+        batch["labels"] = batch["labels"][:1] + [lang_id] + batch["labels"][1:]
+    else:
+        batch["labels"] = batch["labels"][:1] + [51865] + batch["labels"][1:]
     if len(batch["labels"]) > 448:
         batch["labels"] = batch["labels"][:448]
     return batch
@@ -180,7 +200,15 @@ class Whisper_Modified(WhisperForConditionalGeneration):
         super().__init__(config)
         self.model = WhisperModel(config)
         self.proj_out = nn.Linear(config.d_model, config.vocab_size, bias=False)
-        self.weight = nn.Parameter(torch.tensor(new_embedding)) if new_embedding is not None else None
+        if new_embedding == None:
+            self.weight = None
+        elif isinstance(new_embedding, dict):
+            init_tensor = torch.zeros((len(new_embedding.keys()), len(new_embedding[51865])))
+            for key, value in new_embedding.items():
+                init_tensor[int(key) - 51865] = torch.tensor(value).unsqueeze(0)
+            self.weight = nn.Parameter(init_tensor)
+        else:
+            self.weight = nn.Parameter(torch.tensor(new_embedding))
         self.tokens_embed = torch.tensor(language_tokens).to("cuda") if language_tokens is not None else None
 
         # Initialize weights and apply final processing
@@ -217,7 +245,16 @@ class Whisper_Modified(WhisperForConditionalGeneration):
             embedding=self.get_decoder().get_input_embeddings()
             token_embeddings = embedding(self.tokens_embed)
             summation = embedding(decoder_input_ids)
-            summation[:,1,:] = torch.matmul(self.weight, token_embeddings)
+            if len(self.weight.shape) > 1:
+                if labels is not None:
+                    summation[:,2,:] = torch.matmul(self.weight[decoder_input_ids[0][2] - 51865], token_embeddings)
+                else:
+                    summation[:,1,:] = torch.matmul(self.weight[decoder_input_ids[0][1] - 51865], token_embeddings)
+            else:
+                if labels is not None:
+                    summation[:,2,:] = torch.matmul(self.weight, token_embeddings)
+                else:
+                    summation[:,1,:] = torch.matmul(self.weight, token_embeddings)
             decoder_inputs_embeds = summation
             decoder_input_ids = None
 
@@ -268,7 +305,8 @@ class Whisper_Modified(WhisperForConditionalGeneration):
         input_features: Optional[torch.FloatTensor] = None,
         encoder_outputs: Optional[Union[torch.FloatTensor, BaseModelOutput]] = None,
         generation_config: Optional[GenerationConfig] = None,
-        num_segment_frames: int = 3000
+        num_segment_frames: int = 3000,
+        all: bool = False
     ) -> torch.Tensor:
         if input_features is None and encoder_outputs is None:
             raise ValueError("You have to specify either `input_features` or `encoder_outputs`")
@@ -293,7 +331,12 @@ class Whisper_Modified(WhisperForConditionalGeneration):
             logits = self(**inputs, decoder_input_ids=decoder_input_ids).logits[:, -1]
 
         non_lang_mask = torch.ones_like(logits[0], dtype=torch.bool)
-        non_lang_mask[list(generation_config.lang_to_id.values())] = False
+        lang_id = list(generation_config.lang_to_id.values())
+        if all:
+            lang_id.extend([i for i in range(51865, 51895)])
+        else:
+            lang_id.append(51865)
+        non_lang_mask[lang_id] = False
 
         logits[:, non_lang_mask] = -np.inf
         
@@ -407,6 +450,7 @@ def main(arg=None):
     input_arg["group_by_length"] = True
     input_arg["cache_dir"] = "~/.cache"
     dropout = input_arg.get("dropout", 0.0)
+    all = input_arg.get("all", False)
 
     ############
     #  Model   #
@@ -416,7 +460,10 @@ def main(arg=None):
         input_arg["model_config"], task="transcribe", dropout=dropout, language=None
     )
     audio_feature_key = "input_ids"
-    special_tokens_dict = {'additional_special_tokens': ['<|new|>'] + processor.tokenizer.all_special_tokens}
+    if all:
+        special_tokens_dict = {'additional_special_tokens': ['<|ast|>', '<|ceb|>', '<|ckb|>', '<|fil|>', '<|ful|>', '<|gle|>', '<|ibo|>', '<|kam|>', '<|kea|>', '<|kir|>', '<|lug|>', '<|luo|>', '<|msa|>', '<|mya|>', '<|nbl|>', '<|nso|>', '<|nya|>', '<|ori|>', '<|orm|>', '<|pan|>', '<|pus|>', '<|sot|>', '<|ssw|>', '<|tsn|>', '<|tso|>', '<|umb|>', '<|ven|>', '<|wol|>', '<|xho|>', '<|zul|>'] + processor.tokenizer.all_special_tokens}
+    else:
+        special_tokens_dict = {'additional_special_tokens': ['<|new|>'] + processor.tokenizer.all_special_tokens}
     num_added_toks = processor.tokenizer.add_special_tokens(special_tokens_dict)
     
 
@@ -437,7 +484,6 @@ def main(arg=None):
     ############
     #  Dataset #
     ############
-    weight=None
     dataset = load_dataset(
         "csv",
         data_files=input_arg["custom_set_train"],
@@ -450,9 +496,10 @@ def main(arg=None):
         num_proc=1,
         fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
     )
-    weight_train = get_weight(processor, model, data_train)
-    data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor})
-
+    data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor, "all": all})
+    weight_train = get_weight(processor, model, data_train, all)
+    # torch.save(weight_train, "test.pt")
+    # weight_train = torch.load("test.pt")
     dataset_test = load_dataset(
         "csv",
         data_files=input_arg["custom_set_test"],
@@ -468,16 +515,23 @@ def main(arg=None):
         fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
     )
 
-    data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor})
+    data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor, "all": all})
 
-
-    lang_distribution = weight_train.squeeze(0)
-    lang_distribution[51865] = 0
-    language_id_tokens = lang_distribution.nonzero().squeeze(1)
-    lang_distribution = lang_distribution[lang_distribution.nonzero(as_tuple=True)]
     # load from base model
-    model = Whisper_Modified.from_pretrained(pretrained_model_name_or_path=input_arg["model_config"], new_embedding=lang_distribution.tolist(), language_tokens=language_id_tokens.tolist())
-    config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
+    if all:
+        lang_distribution = weight_train
+        language_id_tokens = list(model.generation_config.lang_to_id.values())
+        language_id_tokens.extend([i for i in range(51865, 51895)])
+        for key, value in lang_distribution.items():
+            lang_distribution[key] = lang_distribution[key][lang_distribution[key].nonzero(as_tuple=True)].tolist()
+        model = Whisper_Modified.from_pretrained(pretrained_model_name_or_path=input_arg["model_config"], new_embedding=lang_distribution, language_tokens=language_id_tokens)
+        config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
+    else:
+        lang_distribution = weight_train.squeeze(0)
+        language_id_tokens = lang_distribution.nonzero().squeeze(1)
+        lang_distribution = lang_distribution[lang_distribution.nonzero(as_tuple=True)]
+        model = Whisper_Modified.from_pretrained(pretrained_model_name_or_path=input_arg["model_config"], new_embedding=lang_distribution.tolist(), language_tokens=language_id_tokens.tolist())
+        config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
     model = get_peft_model(model, config)
     model.resize_token_embeddings(len(processor.tokenizer))
 

@@ -4,6 +4,7 @@ from typing import Dict, List, Union, Any
 import torch
 import torchaudio
 from transformers import Wav2Vec2Processor
+from transformers.models.whisper.modeling_whisper import shift_tokens_right
 from datasets import load_dataset, Audio
 
 
@@ -156,7 +157,7 @@ class DataCollatorWeightedSum:
     processor: Any
     audio_feature_key: str = "input_features"
     weight: Any = None
-    
+
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]):
         input_features = [{"input_features": feature[self.audio_feature_key]} for feature in features]
         batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
@@ -176,19 +177,25 @@ class DataCollatorWeightedSum:
 
         # if bos token is appended in previous tokenization step,
         # cut bos token here as it's append later anyways
-        # if (labels[:, 0] == self.processor.tokenizer.bos_token_id).all().cpu().item():
-        #     labels = labels[:, 1:]
+        if (labels[:, 0] == self.processor.tokenizer.bos_token_id).all().cpu().item():
+            labels = labels[:, 1:]
 
         batch["labels"] = labels
+
+        decoder_input_ids = shift_tokens_right(
+            batch["labels"], self.model.config.pad_token_id, self.model.config.decoder_start_token_id
+        )
+        all = isinstance(self.weight, dict)
         with torch.no_grad():
             embedding=self.model.get_decoder().get_input_embeddings()
             if self.weight == None:
-                lang_distribution = self.model.detect_language_custom(batch["input_features"].to("cuda"))
+                print(batch["input_features"])
+                lang_distribution = self.model.detect_language_custom(batch["input_features"].to("cuda"), all=all)
             else:
-                lang_distribution = self.weight
+                lang_distribution = self.weight[decoder_input_ids[0][2].item()] if all else self.weight
             token_embeddings = embedding(lang_distribution[0].nonzero()).squeeze(1)
             lang_distribution = lang_distribution[lang_distribution.nonzero(as_tuple=True)].view(lang_distribution.shape[0], -1)
-            summation = embedding(batch["labels"].to("cuda"))
+            summation = embedding(decoder_input_ids.to("cuda"))
             summation[:,1,:] = torch.matmul(lang_distribution, token_embeddings)
             batch["weight"]=summation
 
