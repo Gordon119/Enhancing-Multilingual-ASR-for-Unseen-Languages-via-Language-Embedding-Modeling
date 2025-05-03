@@ -630,7 +630,7 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
 
 
 def main(arg=None):
-    set_seed(42)
+    
     input_arg, other_arg = parse_args(sys.argv[1:]) if arg is None else parse_args(arg)
     ############
     #  Config  #
@@ -644,6 +644,8 @@ def main(arg=None):
     dropout = input_arg.get("dropout", 0.0)
 
     corpus_wise = input_arg.get("corpus_wise", False)
+    seed = input_arg.get("seed", 42)
+    set_seed(seed)
     ############
     #  Model   #
     ############

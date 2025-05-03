@@ -1,4 +1,4 @@
-# Weghted Sum Embedding as Initialization for Inference and Finetuning of Whisper
+# Enhancing Multilingual ASR for Unseen Languages via Language Embedding Modeling
 
 ## Installation
 Use the exact version of the packages in the ``requirements.txt``.
@@ -16,33 +16,22 @@ path,text
 /tmp2/gordonzz/Whisper_Experiments/data/ml_superb/sixth_edition/fleurs/ast/wav/fleurs_ast_000069.wav,LES IMáXENES D’INFRARROXU AMUESEN QUE LES VARIACIONES DE TEMPERATURA ENTE’L DíA Y LA NUECHE PRUEBEN QUE YE FáCIL QUE SEYAN CUEVES
 ...
 ```
+You can use the scripts ``gen_data_seen.py`` and ``gen_data.py`` in ``tools`` to generate Whisper-seen and Whisper-unseen data.
 
-If you need the whisper-unseen version of ml_superb, please contact me.
-## Inference
-Use the script ``ws_inference.py``. The arguments are:
-- batch: batch size.
-- custom_test_set: the csv path of the testing data.
-- size: the Whisper version (``large-v2``, ``large-v3``)
-- corpus_wise: All the weighted sum embeddings will be averaged to obtain a shared embedding.
-- output_dir: the location to save the output log (containing CER and WER results) and prediction.
+## Zero-shot
+There are three settings for this experiment: Vanilla, Utterance-wise Weighted Sum and Corpus-wise Weighted Sum.
+For the weighted sum methods, please refer to ``ws_zero_shot.sh`` for the usage of ``ws_zero_shot.py``.
+For the vanilla method, please use the script ``vanilla_zero_shot.sh``
 
-Refer to ``ws_inference.sh`` for my usage.
-## Finetune
-There are two settings.
-### Fix Embedding Layer
-Use the script ``ws_finetune_untrainable.py``. The arguments are:
-- grad_accm: gradient accumulation.
-- epoch: training epoch (currently I have not implemented earlystopping)
-- custom_train_set: the csv path of the training data.
+## Finetuning
+For the finetuning experiments, there are two additional methods: Trainable Weighted Sum and Predictor Based methods.
+The following are the scripts and their corresponding settings:
 
-Refer to ``ws_finetune_untrainable.sh`` for my usage.
-### Trainable Embedding Layer
-Use the script ``ws_finetune_untrainable.py``.
-The embedding layer and the weight is trainable in this case. The weight is initialized by the corpus-wise averaged weight, so the default behavior is ``corpus-wise`` here.
-Other arguments are the same with the former ones.
+- Vanilla: ``vanilla_finetune.sh``
+- Utterance-wise and Corpus-wise Weighted Sum: ``ws_finetune_untrainalbe.sh``
+- Trainable Weighted Sum: ``ws_finetune_trainable.sh``
 
-Refer to ``ws_finetune_trainable.sh`` for my usage.
+As for the Predictor-base method, a mlp must be trained first to get the predictor.
 
-## TODO
-- [ ] Try this with different seeds.
-- [ ] Add vanilla inference script.
+- Get training data (weight-embedding pairs) and train the predictor: ``get_predictor.sh``
+- Use the Predictor: ``utterance_wise_with_predictor.sh`` and ``corpus_wise_with_predictor.sh``

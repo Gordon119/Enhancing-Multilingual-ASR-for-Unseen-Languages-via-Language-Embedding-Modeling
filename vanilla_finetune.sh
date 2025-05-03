@@ -1,6 +1,6 @@
-# set -e
-# exp_name="new_token_finetune_vanilla_inference"
-# for dir in data/ml_superb/sixth_edition/languages/ast;do
+set -e
+exp_name="finetune_vanilla"
+# for dir in data/ml_superb/sixth_edition/languages/*;do
 #     size=large-v2
 #     lang=$(basename $dir)
 #     if [ $lang == "all" ]; then
@@ -20,7 +20,8 @@
 
 #run all language at once
 set -e
-exp_name="new_token_finetune_vanilla_inference"
+seed=$1
+exp_name="finetune_vanilla"
 for dir in data/ml_superb/sixth_edition/languages/all;do
     size=large-v2
     lang=$(basename $dir)
@@ -31,6 +32,7 @@ for dir in data/ml_superb/sixth_edition/languages/all;do
         --batch 1 \
         --grad_accum 8 \
         --epoch 5 \
+        --seed $seed \
         --custom_set_train $dir/train.csv \
         --custom_set_test $dir/test_val.csv \
         --output_dir $output_dir > $output_dir/output.log

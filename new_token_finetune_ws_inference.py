@@ -117,7 +117,7 @@ class Whisper_Modified(WhisperForConditionalGeneration):
         encoder_outputs: Optional[Union[torch.FloatTensor, BaseModelOutput]] = None,
         generation_config: Optional[GenerationConfig] = None,
         num_segment_frames: int = 3000,
-        top_k: int = None
+        all: bool = False
     ) -> torch.Tensor:
         if input_features is None and encoder_outputs is None:
             raise ValueError("You have to specify either `input_features` or `encoder_outputs`")
@@ -624,6 +624,14 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
         model.config.use_cache = False  
 
         trainer.train()
+        # if checkpoint:
+        #     model = load_peft_model(checkpoint)
+        # else:
+        #     trainer.train()
+        #     if corpus_wise:
+        #         model.save_pretrained("checkpoint/vanilla_corpus_wise")
+        #     else:
+        #         model.save_pretrained("checkpoint/vanilla_utterance_wise")
     ###################
     #     Evaluate    #
     ###################
@@ -646,8 +654,8 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
                 weights[value] = [weight, 0]
             for batch in tqdm(eval_dataloader):
                 lang_distribution = model.detect_language_custom(input_features=batch["input_features"].to("cuda"), all=True).squeeze()
-                weights[batch["labels"][1]][0] += lang_distribution
-                weights[batch["labels"][1]][1] += 1
+                weights[batch["labels"][0][1].item()][0] += lang_distribution
+                weights[batch["labels"][0][1].item()][1] += 1
             for key, value in NEW_TOKEN_TO_ID.items():
                 weights[value] = weights[value][0] / weights[value][1]
         else:
@@ -660,8 +668,8 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
 
     for step, batch in enumerate(tqdm(eval_dataloader)):
         with torch.no_grad():
-            if weight != None:
-                lang_distribution = weights[batch["labels"][1]] if all else weights
+            if weights != None:
+                lang_distribution = weights[batch["labels"][0][1].item()] if all else weights
             else:
                 lang_distribution = model.detect_language_custom(input_features=batch["input_features"].to("cuda"), all=all).squeeze()
                 # weight_vis += lang_distribution[lang_id]
@@ -715,7 +723,6 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
 
 
 def main(arg=None):
-    set_seed(42)
     input_arg, other_arg = parse_args(sys.argv[1:]) if arg is None else parse_args(arg)
     ############
     #  Config  #
@@ -728,8 +735,10 @@ def main(arg=None):
     input_arg["cache_dir"] = "~/.cache"
     dropout = input_arg.get("dropout", 0.0)
     all = input_arg.get("all", False)
-
+    fix = input_arg.get("fix", False)
     only_eval = input_arg.get("only_eval", False)
+    seed = input_arg.get("seed", 42)
+    set_seed(seed)
     corpus_wise = input_arg.get("corpus_wise", False)
     ############
     #  Model   #
@@ -751,7 +760,11 @@ def main(arg=None):
     model = Whisper_Modified.from_pretrained(input_arg["model_config"])
     config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
     model = get_peft_model(model, config)
-    model.resize_token_embeddings(len(processor.tokenizer))   
+    model.resize_token_embeddings(len(processor.tokenizer))
+    embedding = model.get_decoder().get_input_embeddings().to("cuda")    
+    if fix:
+        embedding.requires_grad = False
+    model.model.set_input_embeddings(embedding)
     model = model.to("cuda")
     
     model.config.forced_decoder_ids = None
@@ -804,7 +817,7 @@ def main(arg=None):
         output_dir=input_arg["output_dir"],
         eval_only=only_eval,
         corpus_wise=corpus_wise,
-        all=all
+        all=all,
     )
 
 if __name__ == "__main__":

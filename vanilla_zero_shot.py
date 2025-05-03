@@ -213,7 +213,6 @@ def experiment(input_arg, model, processor, data_collator, repo_name, data_train
 
 
 def main(arg=None):
-    set_seed(42)
     input_arg, other_arg = parse_args(sys.argv[1:]) if arg is None else parse_args(arg)
     ############
     #  Config  #
@@ -227,6 +226,8 @@ def main(arg=None):
     dropout = input_arg.get("dropout", 0.0)
 
     repo_name = input_arg.get("repo_name", None)
+    seed = input_arg.get("seed", 42)
+    set_seed(seed)
     ############
     #  Model   #
     ############

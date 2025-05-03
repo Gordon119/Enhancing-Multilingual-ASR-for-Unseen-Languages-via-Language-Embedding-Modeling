@@ -28,12 +28,13 @@ from torch.nn import CrossEntropyLoss
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask, _prepare_4d_causal_attention_mask_for_sdpa
 
 # Peft
-from transformers import Seq2SeqTrainer, TrainerCallback, TrainingArguments, TrainerState, TrainerControl, set_seed
+from transformers import Seq2SeqTrainer, TrainerCallback, TrainingArguments, TrainerState, TrainerControl, set_seed, enable_full_determinism
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 # from peft import get_peft_config, get_peft_model, LoraConfig, TaskType
 from peft import LoraConfig, PeftModel, LoraModel, LoraConfig, get_peft_model, PeftConfig
 from peft import prepare_model_for_int8_training
+
 
 NEW_TOKEN_TO_ID = {'ast': 51865, 'ceb': 51866, 'ckb': 51867, 'fil': 51868, 'ful': 51869, 'gle': 51870, 'ibo': 51871, 'kam': 51872, 'kea': 51873, 'kir': 51874, 'lug': 51875, 'luo': 51876, 'msa': 51877, 'mya': 51878, 'nbl': 51879, 'nso': 51880, 'nya': 51881, 'ori': 51882, 'orm': 51883, 'pan': 51884, 'pus': 51885, 'sot': 51886, 'ssw': 51887, 'tsn': 51888, 'tso': 51889, 'umb': 51890, 'ven': 51891, 'wol': 51892, 'xho': 51893, 'zul': 51894}
 
@@ -120,15 +121,7 @@ class SavePeftModelCallback(TrainerCallback):
             os.remove(pytorch_model_path)
         return control
 
-def load_peft_model_from_hub(peft_model_id):
-    peft_config = PeftConfig.from_pretrained(peft_model_id)
-    model = WhisperForConditionalGeneration.from_pretrained(
-        peft_config.base_model_name_or_path
-    )
-    model = PeftModel.from_pretrained(model, peft_model_id,  is_trainable=True) # the is_trainable parameter=true to make sure the model is tranable is we load the checkpoint instead of the base model. 
-    
-    print("Load model from hub successfully.")
-    return model
+
 
 # for LrRescheduleTrainer
 from functools import partial
@@ -670,7 +663,98 @@ class Whisper_Modified(WhisperForConditionalGeneration):
                 "decoder_position_ids": decoder_position_ids,
             }
 
-def experiment(input_arg, model, processor, data_collator, data_train, data_test, time, output_dir, corpus_wise, all):
+def load_peft_model_from_hub(peft_model_id):
+    peft_config = PeftConfig.from_pretrained(peft_model_id)
+    model = Whisper_Modified.from_pretrained(
+        peft_config.base_model_name_or_path
+    )
+    model = PeftModel.from_pretrained(model, peft_model_id,  is_trainable=True) # the is_trainable parameter=true to make sure the model is tranable is we load the checkpoint instead of the base model. 
+    
+    print("Load model from hub successfully.")
+    return model
+
+def main(arg=None):
+    
+    input_arg, other_arg = parse_args(sys.argv[1:]) if arg is None else parse_args(arg)
+    ############
+    #  Config  #
+    ############
+    size = input_arg["size"]
+    time = datetime.now().strftime("%Y%m%d-%H%M%S")
+    input_arg["tokenize_config"] = f"openai/whisper-{size}"
+    input_arg["model_config"] = f"openai/whisper-{size}"
+    input_arg["group_by_length"] = True
+    input_arg["cache_dir"] = "~/.cache"
+    dropout = input_arg.get("dropout", 0.0)
+    all = input_arg.get("all", False)
+    corpus_wise = input_arg.get("corpus_wise", False)
+    seed = input_arg.get("seed", 42)
+    set_seed(seed=seed)
+    ############
+    #  Model   #
+    ############
+
+    processor = WhisperProcessor.from_pretrained(
+        input_arg["model_config"], task="transcribe", dropout=dropout, language=None
+    )
+    audio_feature_key = "input_ids"
+    if all:
+        special_tokens_dict = {'additional_special_tokens': ['<|ast|>', '<|ceb|>', '<|ckb|>', '<|fil|>', '<|ful|>', '<|gle|>', '<|ibo|>', '<|kam|>', '<|kea|>', '<|kir|>', '<|lug|>', '<|luo|>', '<|msa|>', '<|mya|>', '<|nbl|>', '<|nso|>', '<|nya|>', '<|ori|>', '<|orm|>', '<|pan|>', '<|pus|>', '<|sot|>', '<|ssw|>', '<|tsn|>', '<|tso|>', '<|umb|>', '<|ven|>', '<|wol|>', '<|xho|>', '<|zul|>'] + processor.tokenizer.all_special_tokens}
+    else:
+        special_tokens_dict = {'additional_special_tokens': ['<|new|>'] + processor.tokenizer.all_special_tokens}
+    num_added_toks = processor.tokenizer.add_special_tokens(special_tokens_dict)
+    
+
+    # load from base model
+    model = Whisper_Modified.from_pretrained(input_arg["model_config"])
+    config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
+    model = get_peft_model(model, config)
+    model.resize_token_embeddings(len(processor.tokenizer))
+    model = model.to("cuda")
+    model.config.forced_decoder_ids = None
+    model.config.suppress_tokens = []
+    
+    model.print_trainable_parameters()
+
+    ############
+    #  Dataset #
+    ############
+    weight_train=None
+    weight_test=None
+    dataset = load_dataset(
+        "csv",
+        data_files=input_arg["custom_set_train"],
+        cache_dir=input_arg["cache_dir"],
+    )
+    dataset = dataset.filter(lambda e: nlp2.is_file_exist(e["path"]))
+    data_train = dataset["train"]
+    data_train = data_train.map(
+        prepare_dataset_whisper,
+        num_proc=1,
+        fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
+    )
+    data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor, "all": all})
+    weight_train = get_weight(processor, model, data_train, all=all) if corpus_wise else None
+
+    dataset_test = load_dataset(
+        "csv",
+        data_files=input_arg["custom_set_test"],
+        cache_dir=input_arg["cache_dir"],
+        # cache_dir=None,
+    )
+    dataset_test = dataset_test.filter(lambda e: nlp2.is_file_exist(e["path"]))
+    data_test = dataset_test["train"]
+
+    data_test = data_test.map(
+        prepare_dataset_whisper,
+        num_proc=1,
+        fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
+    )
+    data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor, "all": all})
+    weight_test = get_weight(processor, model, data_test, all=all) if corpus_wise else None
+
+    data_collator = DataCollatorWeightedSum(processor=processor, audio_feature_key=audio_feature_key, model=model, weight=weight_train)
+
     training_args = Seq2SeqTrainingArguments(
         do_eval=False,
         output_dir=input_arg.get("output_dir", "."),
@@ -698,7 +782,8 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
         weight_decay=input_arg.get("weight_decay", 0.02),
         remove_unused_columns=False,
         label_names=["labels"],
-        dataloader_pin_memory=False
+        dataloader_pin_memory=False,
+        seed=42
     )
 
     training_args.generation_max_length = 225
@@ -717,6 +802,7 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
     model.config.use_cache = False  
 
     trainer.train()
+
     ###################
     #     Evaluate    #
     ###################
@@ -727,31 +813,11 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
     label_list = []
     pred_list = []
     pred_results = []
-    weights = None
-    if corpus_wise:
-        weight = torch.zeros_like(model.detect_language_custom(torch.Tensor(data_train[0]["input_ids"]).unsqueeze(0).to("cuda"), all=all))
-        if all:
-            weights={}
-            for key, value in NEW_TOKEN_TO_ID.items():
-                weights[value] = [weight, 0]
-            for batch in tqdm(eval_dataloader):
-                lang_distribution = model.detect_language_custom(input_features=batch["input_features"].to("cuda"), all=True).squeeze()
-                print(batch["labels"])
-                weights[batch["labels"][0][1].item()][0] += lang_distribution
-                weights[batch["labels"][0][1].item()][1] += 1
-            for key, value in NEW_TOKEN_TO_ID.items():
-                weights[value] = weights[value][0] / weights[value][1]
-        else:
-            weights = weight
-            for batch in eval_dataloader:
-                lang_distribution = model.detect_language_custom(input_features=batch["input_features"].to("cuda")).squeeze()
-                weights += lang_distribution
-            weights /= len(eval_dataloader)
 
     for step, batch in enumerate(tqdm(eval_dataloader)):
         with torch.no_grad():
-            if weights != None:
-                lang_distribution = weights[batch["labels"][0][1].item()] if all else weights
+            if weight_test != None:
+                lang_distribution = weight_test[batch["labels"][0][1].item()] if all else weight_test
             else:
                 lang_distribution = model.detect_language_custom(input_features=batch["input_features"].to("cuda"), all=all).squeeze()
             generated_tokens = (
@@ -780,108 +846,12 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
             pred_str = (" ").join(pred_str)
         del generated_tokens, labels, batch
         gc.collect()
-    nlp2.write_csv(pred_results, f'{output_dir}/pred.csv')
+    nlp2.write_csv(pred_results, f'{input_arg["output_dir"]}/pred.csv')
     cer = cer_cal(label_list, pred_list)
     wer = wer_cal(label_list, pred_list)
     print("********* Evaluation Result *********")
     print(f"cer: {cer}, wer: {wer}")
     print("*************************************")
-    return model
-
-
-def main(arg=None):
-    set_seed(42)
-    input_arg, other_arg = parse_args(sys.argv[1:]) if arg is None else parse_args(arg)
-    ############
-    #  Config  #
-    ############
-    size = input_arg["size"]
-    time = datetime.now().strftime("%Y%m%d-%H%M%S")
-    input_arg["tokenize_config"] = f"openai/whisper-{size}"
-    input_arg["model_config"] = f"openai/whisper-{size}"
-    input_arg["group_by_length"] = True
-    input_arg["cache_dir"] = "~/.cache"
-    dropout = input_arg.get("dropout", 0.0)
-    all = input_arg.get("all", False)
-
-    corpus_wise = input_arg.get("corpus_wise", False)
-    ############
-    #  Model   #
-    ############
-
-    processor = WhisperProcessor.from_pretrained(
-        input_arg["model_config"], task="transcribe", dropout=dropout, language=None
-    )
-    audio_feature_key = "input_ids"
-    if all:
-        special_tokens_dict = {'additional_special_tokens': ['<|ast|>', '<|ceb|>', '<|ckb|>', '<|fil|>', '<|ful|>', '<|gle|>', '<|ibo|>', '<|kam|>', '<|kea|>', '<|kir|>', '<|lug|>', '<|luo|>', '<|msa|>', '<|mya|>', '<|nbl|>', '<|nso|>', '<|nya|>', '<|ori|>', '<|orm|>', '<|pan|>', '<|pus|>', '<|sot|>', '<|ssw|>', '<|tsn|>', '<|tso|>', '<|umb|>', '<|ven|>', '<|wol|>', '<|xho|>', '<|zul|>'] + processor.tokenizer.all_special_tokens}
-    else:
-        special_tokens_dict = {'additional_special_tokens': ['<|new|>'] + processor.tokenizer.all_special_tokens}
-    num_added_toks = processor.tokenizer.add_special_tokens(special_tokens_dict)
-    
-
-    # load from base model
-    model = Whisper_Modified.from_pretrained(input_arg["model_config"])
-    config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
-    model = get_peft_model(model, config)
-    model.resize_token_embeddings(len(processor.tokenizer))
-
-    model = model.to("cuda")
-    
-    model.config.forced_decoder_ids = None
-    model.config.suppress_tokens = []
-    
-    model.print_trainable_parameters()
-
-    ############
-    #  Dataset #
-    ############
-    weight=None
-    dataset = load_dataset(
-        "csv",
-        data_files=input_arg["custom_set_train"],
-        cache_dir=input_arg["cache_dir"],
-    )
-    dataset = dataset.filter(lambda e: nlp2.is_file_exist(e["path"]))
-    data_train = dataset["train"]
-    data_train = data_train.map(
-        prepare_dataset_whisper,
-        num_proc=1,
-        fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
-    )
-    data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor, "all": all})
-    weight = get_weight(processor, model, data_train, all=all) if corpus_wise else None
-
-    dataset_test = load_dataset(
-        "csv",
-        data_files=input_arg["custom_set_test"],
-        cache_dir=input_arg["cache_dir"],
-        # cache_dir=None,
-    )
-    dataset_test = dataset_test.filter(lambda e: nlp2.is_file_exist(e["path"]))
-    data_test = dataset_test["train"]
-
-    data_test = data_test.map(
-        prepare_dataset_whisper,
-        num_proc=1,
-        fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
-    )
-    data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor, "all": all})
-
-    data_collator = DataCollatorWeightedSum(processor=processor, audio_feature_key=audio_feature_key, model=model, weight=weight)
-
-    model = experiment(
-        input_arg,
-        model,
-        processor,
-        data_collator,
-        data_train,
-        data_test,
-        time,
-        output_dir=input_arg["output_dir"],
-        corpus_wise=corpus_wise,
-        all=all,
-    )
 
 if __name__ == "__main__":
     main()

@@ -342,7 +342,6 @@ class Whisper_Modified(WhisperForConditionalGeneration):
         
         return logits.softmax(-1)
 
-
 def experiment(input_arg, model, processor, data_collator, data_train, data_test, time, output_dir, weight):
     training_args = Seq2SeqTrainingArguments(
         do_eval=False,
@@ -388,8 +387,9 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
         callbacks=[SavePeftModelCallback],
     )
     model.config.use_cache = False  
-
+    
     trainer.train()
+
     ###################
     #     Evaluate    #
     ###################
@@ -438,7 +438,6 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
 
 
 def main(arg=None):
-    set_seed(42)
     input_arg, other_arg = parse_args(sys.argv[1:]) if arg is None else parse_args(arg)
     ############
     #  Config  #
@@ -451,7 +450,8 @@ def main(arg=None):
     input_arg["cache_dir"] = "~/.cache"
     dropout = input_arg.get("dropout", 0.0)
     all = input_arg.get("all", False)
-
+    seed = input_arg.get("seed", 42)
+    set_seed(seed=seed)
     ############
     #  Model   #
     ############

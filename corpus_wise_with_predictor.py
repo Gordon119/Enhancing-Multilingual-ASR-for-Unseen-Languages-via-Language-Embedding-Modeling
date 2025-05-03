@@ -34,8 +34,78 @@ from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 # from peft import get_peft_config, get_peft_model, LoraConfig, TaskType
 from peft import LoraConfig, PeftModel, LoraModel, LoraConfig, get_peft_model, PeftConfig
 from peft import prepare_model_for_int8_training
+import torch.nn as nn
 
 NEW_TOKEN_TO_ID = {'ast': 51865, 'ceb': 51866, 'ckb': 51867, 'fil': 51868, 'ful': 51869, 'gle': 51870, 'ibo': 51871, 'kam': 51872, 'kea': 51873, 'kir': 51874, 'lug': 51875, 'luo': 51876, 'msa': 51877, 'mya': 51878, 'nbl': 51879, 'nso': 51880, 'nya': 51881, 'ori': 51882, 'orm': 51883, 'pan': 51884, 'pus': 51885, 'sot': 51886, 'ssw': 51887, 'tsn': 51888, 'tso': 51889, 'umb': 51890, 'ven': 51891, 'wol': 51892, 'xho': 51893, 'zul': 51894}
+
+class MLP(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(MLP, self).__init__()
+        self.hidden = nn.Linear(input_size, hidden_size)
+        self.relu = nn.ReLU()
+        self.output = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        x = self.hidden(x)
+        x = self.relu(x)
+        x = self.output(x)
+        return x
+
+def get_weight(key, whisper, predictor, data_train, lang_embedding):
+    weight = torch.zeros_like(whisper.detect_language_custom(torch.Tensor(data_train[0]["input_ids"]).unsqueeze(0).to("cuda")))
+    id = NEW_TOKEN_TO_ID[key]
+    for batch in tqdm(data_train):
+        if batch["labels"][1] != id:
+            continue
+        lang_distribution = whisper.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"))
+        weight += lang_distribution
+    weight /= len(data_train)
+    input = torch.matmul(weight, lang_embedding).to("cuda")
+    predictor.eval()
+    with torch.no_grad():
+        pred = predictor(input)
+    return pred
+
+class Whisper_Modified(WhisperForConditionalGeneration):
+    def detect_language_custom(
+        self,
+        input_features: Optional[torch.FloatTensor] = None,
+        encoder_outputs: Optional[Union[torch.FloatTensor, BaseModelOutput]] = None,
+        generation_config: Optional[GenerationConfig] = None,
+        num_segment_frames: int = 3000,
+    ) -> torch.Tensor:
+        if input_features is None and encoder_outputs is None:
+            raise ValueError("You have to specify either `input_features` or `encoder_outputs`")
+        elif input_features is not None and encoder_outputs is not None:
+            raise ValueError("Make sure to specificy only one of `input_features` or `encoder_outputs` - not both!")
+        elif input_features is not None:
+            inputs = {"input_features": input_features[:, :, :num_segment_frames]}
+            batch_size = input_features.shape[0]
+        elif encoder_outputs is not None:
+            inputs = {"encoder_outputs": encoder_outputs}
+            batch_size = (
+                encoder_outputs[0].shape[0] if isinstance(encoder_outputs, BaseModelOutput) else encoder_outputs[0]
+            )
+
+        generation_config = generation_config or self.generation_config
+        decoder_input_ids = (
+            torch.ones((batch_size, 1), device=self.device, dtype=torch.long)
+            * generation_config.decoder_start_token_id
+        )
+
+        with torch.no_grad():
+            logits = self(**inputs, decoder_input_ids=decoder_input_ids).logits[:, -1]
+
+        non_lang_mask = torch.ones_like(logits[0], dtype=torch.bool)
+        lang_id = list(generation_config.lang_to_id.values())
+        # if all:
+        #     lang_id.extend([i for i in range(51865, 51895)])
+        # else:
+        #     lang_id.append(51865)
+        non_lang_mask[lang_id] = False
+        logits[:, non_lang_mask] = -np.inf
+        
+        return logits.softmax(-1)[:, lang_id]
 
 def prepare_dataset_whisper(batch, feature_extractor, audio_feature_key):
     path = batch["path"]
@@ -56,7 +126,7 @@ def prepare_dataset_whisper(batch, feature_extractor, audio_feature_key):
         batch["labels"] = batch["text"]
     return batch
 
-def encode_dataset(batch, processor, phonemize=False, backend=None, separator=None):
+def encode_dataset(batch, processor, phonemize=False, backend=None, separator=None, all=False):
     if not isinstance(batch["labels"], list):
         if phonemize:
             with processor.as_target_processor():
@@ -72,9 +142,12 @@ def encode_dataset(batch, processor, phonemize=False, backend=None, separator=No
             except Exception as e:
                 line = bytes(batch["labels"], "utf-8").decode("utf-8", "ignore")
                 batch["labels"] = processor.tokenizer(line).input_ids
-    lang=batch["path"].split("/")[-3]
-    lang_id=NEW_TOKEN_TO_ID[lang]
-    batch["labels"] = batch["labels"][:1] + [lang_id] + batch["labels"][1:]
+    if all:
+        lang=batch["path"].split("/")[-3]
+        lang_id=NEW_TOKEN_TO_ID[lang]
+        batch["labels"] = batch["labels"][:1] + [lang_id] + batch["labels"][1:]
+    else:
+        batch["labels"] = batch["labels"][:1] + [51865] + batch["labels"][1:]
     if len(batch["labels"]) > 448:
         batch["labels"] = batch["labels"][:448]
     return batch
@@ -217,6 +290,14 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
         model.config.use_cache = False  
 
         trainer.train()
+        # if checkpoint:
+        #     model = load_peft_model(checkpoint)
+        # else:
+        #     trainer.train()
+        #     if corpus_wise:
+        #         model.save_pretrained("checkpoint/vanilla_corpus_wise")
+        #     else:
+        #         model.save_pretrained("checkpoint/vanilla_utterance_wise")
     ###################
     #     Evaluate    #
     ###################
@@ -227,6 +308,8 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
     label_list = []
     pred_list = []
     pred_results = []
+    lang_id = list(model.generation_config.lang_to_id.values())
+
     for step, batch in enumerate(tqdm(eval_dataloader)):
         with torch.no_grad():
             generated_tokens = (
@@ -254,6 +337,7 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
             pred_str = (" ").join(pred_str)
         del generated_tokens, labels, batch
         gc.collect()
+
     nlp2.write_csv(pred_results, f'{output_dir}/pred.csv')
     cer = cer_cal(label_list, pred_list)
     wer = wer_cal(label_list, pred_list)
@@ -261,7 +345,6 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
     print(f"cer: {cer}, wer: {wer}")
     print("*************************************")
     return model
-
 
 def main(arg=None):
     input_arg, other_arg = parse_args(sys.argv[1:]) if arg is None else parse_args(arg)
@@ -275,9 +358,12 @@ def main(arg=None):
     input_arg["group_by_length"] = True
     input_arg["cache_dir"] = "~/.cache"
     dropout = input_arg.get("dropout", 0.0)
+    all = input_arg.get("all", False)
+    fix = input_arg.get("fix", False)
+    only_eval = input_arg.get("only_eval", False)
+    corpus_wise = input_arg.get("corpus_wise", False)
     seed = input_arg.get("seed", 42)
     set_seed(seed=seed)
-    only_eval = input_arg.get("only_eval", False)
     ############
     #  Model   #
     ############
@@ -286,16 +372,20 @@ def main(arg=None):
         input_arg["model_config"], task="transcribe", dropout=dropout, language=None
     )
     audio_feature_key = "input_ids"
-    special_tokens_dict = {'additional_special_tokens': ['<|ast|>', '<|ceb|>', '<|ckb|>', '<|fil|>', '<|ful|>', '<|gle|>', '<|ibo|>', '<|kam|>', '<|kea|>', '<|kir|>', '<|lug|>', '<|luo|>', '<|msa|>', '<|mya|>', '<|nbl|>', '<|nso|>', '<|nya|>', '<|ori|>', '<|orm|>', '<|pan|>', '<|pus|>', '<|sot|>', '<|ssw|>', '<|tsn|>', '<|tso|>', '<|umb|>', '<|ven|>', '<|wol|>', '<|xho|>', '<|zul|>'] + processor.tokenizer.all_special_tokens}
+    if all:
+        special_tokens_dict = {'additional_special_tokens': ['<|ast|>', '<|ceb|>', '<|ckb|>', '<|fil|>', '<|ful|>', '<|gle|>', '<|ibo|>', '<|kam|>', '<|kea|>', '<|kir|>', '<|lug|>', '<|luo|>', '<|msa|>', '<|mya|>', '<|nbl|>', '<|nso|>', '<|nya|>', '<|ori|>', '<|orm|>', '<|pan|>', '<|pus|>', '<|sot|>', '<|ssw|>', '<|tsn|>', '<|tso|>', '<|umb|>', '<|ven|>', '<|wol|>', '<|xho|>', '<|zul|>'] + processor.tokenizer.all_special_tokens}
+    else:
+        special_tokens_dict = {'additional_special_tokens': ['<|new|>'] + processor.tokenizer.all_special_tokens}
     num_added_toks = processor.tokenizer.add_special_tokens(special_tokens_dict)
 
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor, audio_feature_key=audio_feature_key)
 
     # load from base model
-    model = WhisperForConditionalGeneration.from_pretrained(input_arg["model_config"])
+    model = Whisper_Modified.from_pretrained(input_arg["model_config"])
     config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
     model = get_peft_model(model, config)
-    model.resize_token_embeddings(len(processor.tokenizer))   
+    model.resize_token_embeddings(len(processor.tokenizer))
+
     model = model.to("cuda")
     
     model.config.forced_decoder_ids = None
@@ -319,7 +409,7 @@ def main(arg=None):
         num_proc=1,
         fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
     )
-    data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor})
+    data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor, "all": all})
 
     dataset_test = load_dataset(
         "csv",
@@ -335,7 +425,22 @@ def main(arg=None):
         num_proc=1,
         fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
     )
-    data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor})
+    data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor, "all":all})
+
+    with torch.no_grad():
+        embedding = model.get_decoder().get_input_embeddings().to("cuda")    
+        if fix:
+            embedding.requires_grad = False
+        lang_id = torch.tensor(list(model.generation_config.lang_to_id.values())).to("cuda")
+        lang_embedding = embedding(lang_id).to("cuda")
+        predictor = torch.load("weights_mlp_predictor_naive/model.pt").to("cuda")
+        if all:
+            for key, value in NEW_TOKEN_TO_ID.items():
+                embedding.weight[value, :] = get_weight(key, model, predictor, data_train, lang_embedding)
+            model.model.set_input_embeddings(embedding)
+        else:
+            embedding.weight[51865, :] = get_weight("ast", model, predictor, data_train, lang_embedding)
+            model.model.set_input_embeddings(embedding)
 
     model = experiment(
         input_arg,

@@ -1,5 +1,5 @@
 import copy
-import sys
+import sys, os
 
 import nlp2
 from datasets import load_dataset
@@ -8,7 +8,7 @@ from transformers import WhisperProcessor
 from datasets import load_from_disk
 from transformers.activations import ACT2FN
 from module.args import parse_args
-from module.data_processing import DataCollatorSpeechSeq2SeqWithPadding
+from module.data_processing import DataCollatorSpeechSeq2SeqWithPadding, DataCollatorWeightedSum, DataCollatorMLPpredictor
 from module.metric import cer_cal, wer_cal
 
 from datetime import datetime
@@ -20,7 +20,7 @@ import numpy as np
 import gc
 import torch
 import torchaudio
-from typing import Callable, Iterator, List, Optional, Tuple, Union
+from typing import Callable, Iterator, List, Optional, Tuple, Union, Dict
 from transformers.modeling_outputs import BaseModelOutput, Seq2SeqLMOutput, Seq2SeqModelOutput, BaseModelOutputWithPastAndCrossAttentions
 from transformers.generation.configuration_utils import GenerationConfig
 from transformers.models.whisper.modeling_whisper import shift_tokens_right, WhisperDecoder, WhisperEncoder, WhisperPositionalEmbedding, WhisperDecoderLayer
@@ -34,6 +34,22 @@ from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 # from peft import get_peft_config, get_peft_model, LoraConfig, TaskType
 from peft import LoraConfig, PeftModel, LoraModel, LoraConfig, get_peft_model, PeftConfig
 from peft import prepare_model_for_int8_training
+import torch.nn as nn
+
+NEW_TOKEN_TO_ID = {'ast': 51865, 'ceb': 51866, 'ckb': 51867, 'fil': 51868, 'ful': 51869, 'gle': 51870, 'ibo': 51871, 'kam': 51872, 'kea': 51873, 'kir': 51874, 'lug': 51875, 'luo': 51876, 'msa': 51877, 'mya': 51878, 'nbl': 51879, 'nso': 51880, 'nya': 51881, 'ori': 51882, 'orm': 51883, 'pan': 51884, 'pus': 51885, 'sot': 51886, 'ssw': 51887, 'tsn': 51888, 'tso': 51889, 'umb': 51890, 'ven': 51891, 'wol': 51892, 'xho': 51893, 'zul': 51894}
+
+class MLP(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(MLP, self).__init__()
+        self.hidden = nn.Linear(input_size, hidden_size)
+        self.relu = nn.ReLU()
+        self.output = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        x = self.hidden(x)
+        x = self.relu(x)
+        x = self.output(x)
+        return x
 
 def prepare_dataset_whisper(batch, feature_extractor, audio_feature_key):
     path = batch["path"]
@@ -54,15 +70,7 @@ def prepare_dataset_whisper(batch, feature_extractor, audio_feature_key):
         batch["labels"] = batch["text"]
     return batch
 
-def get_weight(processor, model, data_train):
-    weight = torch.zeros_like(model.detect_language_custom(torch.Tensor(data_train[0]["input_ids"]).unsqueeze(0).to("cuda")))
-    for batch in data_train:
-        lang_distribution = model.detect_language_custom(torch.Tensor(batch["input_ids"]).unsqueeze(0).to("cuda"))
-        weight += lang_distribution
-    weight /= len(data_train)
-    return weight
-
-def encode_dataset(batch, processor, phonemize=False, backend=None, separator=None):
+def encode_dataset(batch, processor, phonemize=False, backend=None, separator=None, all=False):
     if not isinstance(batch["labels"], list):
         if phonemize:
             with processor.as_target_processor():
@@ -78,6 +86,12 @@ def encode_dataset(batch, processor, phonemize=False, backend=None, separator=No
             except Exception as e:
                 line = bytes(batch["labels"], "utf-8").decode("utf-8", "ignore")
                 batch["labels"] = processor.tokenizer(line).input_ids
+    if all:
+        lang=batch["path"].split("/")[-3]
+        lang_id=NEW_TOKEN_TO_ID[lang]
+        batch["labels"] = batch["labels"][:1] + [lang_id] + batch["labels"][1:]
+    else:
+        batch["labels"] = batch["labels"][:1] + [51865] + batch["labels"][1:]
     if len(batch["labels"]) > 448:
         batch["labels"] = batch["labels"][:448]
     return batch
@@ -110,43 +124,142 @@ def load_peft_model_from_hub(peft_model_id):
     print("Load model from hub successfully.")
     return model
 
+# for LrRescheduleTrainer
+from functools import partial
+from torch.optim.lr_scheduler import LambdaLR
+
+class LrRescheduleTrainer(Seq2SeqTrainer):
+    def __init__(self, specified_epoch, total_epoch, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        # Add custom attributes here
+        self.total_epoch = total_epoch
+        self.specified_epoch = 0
+        
+    def create_scheduler(self, num_training_steps: int, optimizer: torch.optim.Optimizer = None):
+        """
+        Setup the scheduler. The optimizer of the trainer must have been set up either before this method is called or
+        passed as an argument.
+
+        Args:
+            num_training_steps (int): The number of training steps to do.
+        """
+        
+        self.lr_scheduler = self.get_linear_schedule_with_warmup(
+            optimizer=self.optimizer if optimizer is None else optimizer,
+            num_warmup_steps=self.args.get_warmup_steps(num_training_steps),
+            num_training_steps=num_training_steps,
+        )
+        return self.lr_scheduler
+
+    def get_linear_schedule_with_warmup(self, optimizer, num_warmup_steps, num_training_steps, last_epoch=-1):
+        """
+        Create a schedule with a learning rate that decreases linearly from the initial lr set in the optimizer to 0, after
+        a warmup period during which it increases linearly from 0 to the initial lr set in the optimizer.
+
+        Args:
+            optimizer ([`~torch.optim.Optimizer`]):
+                The optimizer for which to schedule the learning rate.
+            num_warmup_steps (`int`):
+                The number of steps for the warmup phase.
+            num_training_steps (`int`):
+                The total number of training steps.
+            last_epoch (`int`, *optional*, defaults to -1):
+               The index of the last epoch when resuming training. 
+
+        Return:
+            `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.
+        """
+
+        lr_lambda = partial(
+            self._get_linear_schedule_with_warmup_lr_lambda,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+        )
+        return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+    def _get_linear_schedule_with_warmup_lr_lambda(self, current_step: int, *, num_warmup_steps: int, num_training_steps: int):
+        # The only difference
+        current_step += num_training_steps * self.specified_epoch
+        num_training_steps *= self.total_epoch
+
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        return max(0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps)))
+
 class Whisper_Modified(WhisperForConditionalGeneration):
-    def detect_language_custom(
+    def forward(
         self,
         input_features: Optional[torch.FloatTensor] = None,
-        encoder_outputs: Optional[Union[torch.FloatTensor, BaseModelOutput]] = None,
-        generation_config: Optional[GenerationConfig] = None,
-        num_segment_frames: int = 3000,
-        top_k: int = None
-    ) -> torch.Tensor:
-        if input_features is None and encoder_outputs is None:
-            raise ValueError("You have to specify either `input_features` or `encoder_outputs`")
-        elif input_features is not None and encoder_outputs is not None:
-            raise ValueError("Make sure to specificy only one of `input_features` or `encoder_outputs` - not both!")
-        elif input_features is not None:
-            inputs = {"input_features": input_features[:, :, :num_segment_frames]}
-            batch_size = input_features.shape[0]
-        elif encoder_outputs is not None:
-            inputs = {"encoder_outputs": encoder_outputs}
-            batch_size = (
-                encoder_outputs[0].shape[0] if isinstance(encoder_outputs, BaseModelOutput) else encoder_outputs[0]
-            )
+        attention_mask: Optional[torch.LongTensor] = None,
+        decoder_input_ids: Optional[torch.LongTensor] = None,
+        decoder_attention_mask: Optional[torch.LongTensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        decoder_head_mask: Optional[torch.Tensor] = None,
+        cross_attn_head_mask: Optional[torch.Tensor] = None,
+        encoder_outputs: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
+        past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
+        decoder_inputs_embeds: Optional[Tuple[torch.FloatTensor]] = None,
+        decoder_position_ids: Optional[Tuple[torch.LongTensor]] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        weight: Optional[torch.Tensor] = None,
+    ) -> Union[Tuple[torch.Tensor], Seq2SeqLMOutput]:
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        generation_config = generation_config or self.generation_config
-        decoder_input_ids = (
-            torch.ones((batch_size, 1), device=self.device, dtype=torch.long)
-            * generation_config.decoder_start_token_id
+        if labels is not None:
+            if decoder_input_ids is None and decoder_inputs_embeds is None:
+                decoder_input_ids = shift_tokens_right(
+                    labels, self.config.pad_token_id, self.config.decoder_start_token_id
+                )
+        if weight != None:
+            decoder_inputs_embeds = weight
+            decoder_input_ids = None
+
+        outputs = self.model(
+            input_features,
+            attention_mask=attention_mask,
+            decoder_input_ids=decoder_input_ids,
+            encoder_outputs=encoder_outputs,
+            decoder_attention_mask=decoder_attention_mask,
+            head_mask=head_mask,
+            decoder_head_mask=decoder_head_mask,
+            cross_attn_head_mask=cross_attn_head_mask,
+            past_key_values=past_key_values,
+            decoder_inputs_embeds=decoder_inputs_embeds,
+            decoder_position_ids=decoder_position_ids,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
         )
+        lm_logits = self.proj_out(outputs[0])
 
-        with torch.no_grad():
-            logits = self(**inputs, decoder_input_ids=decoder_input_ids).logits[:, -1]
+        loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            # move labels to correct device to enable PP
+            labels = labels.to(lm_logits.device)
+            loss = loss_fct(lm_logits.view(-1, self.config.vocab_size), labels.reshape(-1))
 
-        non_lang_mask = torch.ones_like(logits[0], dtype=torch.bool)
-        lang_id = list(generation_config.lang_to_id.values())
-        non_lang_mask[lang_id] = False
-        logits[:, non_lang_mask] = -np.inf
-        
-        return logits.softmax(-1)
+        if not return_dict:
+            output = (lm_logits,) + outputs[1:]
+            return ((loss,) + output) if loss is not None else output
+
+        return Seq2SeqLMOutput(
+            loss=loss,
+            logits=lm_logits,
+            past_key_values=outputs.past_key_values,
+            decoder_hidden_states=outputs.decoder_hidden_states,
+            decoder_attentions=outputs.decoder_attentions,
+            cross_attentions=outputs.cross_attentions,
+            encoder_last_hidden_state=outputs.encoder_last_hidden_state,
+            encoder_hidden_states=outputs.encoder_hidden_states,
+            encoder_attentions=outputs.encoder_attentions,
+        )
 
     def generate(
         self,
@@ -174,8 +287,10 @@ class Whisper_Modified(WhisperForConditionalGeneration):
         return_segments: bool = False,
         return_dict_in_generate: Optional[bool] = None,
         lang_distribution=None,
+        predictor=None,
         **kwargs,
     ):
+        self.predictor = predictor
         self.lang_distribution = lang_distribution
         # 0. deprecate old inputs
         if "inputs" in kwargs:
@@ -197,7 +312,6 @@ class Whisper_Modified(WhisperForConditionalGeneration):
             input_features=input_features, input_stride=input_stride, kwargs=kwargs
         )
         is_shortform = total_input_frames <= num_segment_frames
-
         if is_shortform:
             # warn user of ignored inputs
             self._maybe_warn_unused_inputs(
@@ -451,6 +565,44 @@ class Whisper_Modified(WhisperForConditionalGeneration):
 
         return sequences
 
+    def detect_language_custom(
+        self,
+        input_features: Optional[torch.FloatTensor] = None,
+        encoder_outputs: Optional[Union[torch.FloatTensor, BaseModelOutput]] = None,
+        generation_config: Optional[GenerationConfig] = None,
+        num_segment_frames: int = 3000,
+        all: bool = False
+    ) -> torch.Tensor:
+        if input_features is None and encoder_outputs is None:
+            raise ValueError("You have to specify either `input_features` or `encoder_outputs`")
+        elif input_features is not None and encoder_outputs is not None:
+            raise ValueError("Make sure to specificy only one of `input_features` or `encoder_outputs` - not both!")
+        elif input_features is not None:
+            inputs = {"input_features": input_features[:, :, :num_segment_frames]}
+            batch_size = input_features.shape[0]
+        elif encoder_outputs is not None:
+            inputs = {"encoder_outputs": encoder_outputs}
+            batch_size = (
+                encoder_outputs[0].shape[0] if isinstance(encoder_outputs, BaseModelOutput) else encoder_outputs[0]
+            )
+
+        generation_config = generation_config or self.generation_config
+        decoder_input_ids = (
+            torch.ones((batch_size, 1), device=self.device, dtype=torch.long)
+            * generation_config.decoder_start_token_id
+        )
+
+        with torch.no_grad():
+            logits = self(**inputs, decoder_input_ids=decoder_input_ids).logits[:, -1]
+
+        non_lang_mask = torch.ones_like(logits[0], dtype=torch.bool)
+        lang_id = list(generation_config.lang_to_id.values())
+        non_lang_mask[lang_id] = False
+
+        logits[:, non_lang_mask] = -np.inf
+
+        return logits.softmax(-1)
+
     def prepare_inputs_for_generation(
         self,
         decoder_input_ids,
@@ -491,10 +643,9 @@ class Whisper_Modified(WhisperForConditionalGeneration):
             token_embeddings = embedding(lang_distribution[0].nonzero()).squeeze(1)
             lang_distribution = lang_distribution[lang_distribution.nonzero(as_tuple=True)].view(lang_distribution.shape[0], -1)
             summation = embedding(decoder_input_ids)
-            batch_size = summation.shape[0]
-            zeros = torch.zeros((batch_size, 1, 1280)).to("cuda")
-            summation = torch.cat([summation[:, :1, :], zeros, summation[:, 1:, :]], dim=1)
-            summation[:,1,:] = torch.matmul(lang_distribution, token_embeddings)
+            self.predictor.eval()
+            with torch.no_grad():
+                summation[:,1,:] = self.predictor(torch.matmul(lang_distribution, token_embeddings))
             return {
                 "encoder_outputs": encoder_outputs,
                 "past_key_values": past_key_values,
@@ -513,116 +664,54 @@ class Whisper_Modified(WhisperForConditionalGeneration):
                 "decoder_position_ids": decoder_position_ids,
             }
 
-# for LrRescheduleTrainer
-from functools import partial
-from torch.optim.lr_scheduler import LambdaLR
+def experiment(input_arg, model, processor, data_collator, data_train, data_test, time, output_dir, all):
+    training_args = Seq2SeqTrainingArguments(
+        do_eval=False,
+        output_dir=input_arg.get("output_dir", "."),
+        length_column_name="lengths",
+        group_by_length=input_arg["group_by_length"],
+        per_device_train_batch_size=int(input_arg["batch"]),
+        per_device_eval_batch_size=int(input_arg["batch"]),
+        gradient_accumulation_steps=int(input_arg["grad_accum"]),
+        eval_accumulation_steps=int(input_arg["grad_accum"]),
+        evaluation_strategy="no",
+        save_strategy="no",
+        ddp_find_unused_parameters=True,
+        resume_from_checkpoint=input_arg.get("checkpoint", False),
+        overwrite_output_dir=input_arg.get("overwrite_output_dir", False),
+        greater_is_better=False,
+        metric_for_best_model="cer",
+        num_train_epochs=input_arg.get("epoch", 5),
+        fp16=True,
+        logging_steps=input_arg.get("logging_steps", 10),
+        learning_rate=input_arg.get("learning_rate", 4.7e-5),
+        warmup_steps=input_arg.get("warmup_steps", 100),
+        save_total_limit=input_arg.get("save_total_limit", 3),
+        push_to_hub=False,
+        report_to="none",
+        weight_decay=input_arg.get("weight_decay", 0.02),
+        remove_unused_columns=False,
+        label_names=["labels"],
+        dataloader_pin_memory=False
+    )
 
-class LrRescheduleTrainer(Seq2SeqTrainer):
-    def __init__(self, specified_epoch, total_epoch, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        
-        # Add custom attributes here
-        self.total_epoch = total_epoch
-        self.specified_epoch = 0
-        
-    def create_scheduler(self, num_training_steps: int, optimizer: torch.optim.Optimizer = None):
-        """
-        Setup the scheduler. The optimizer of the trainer must have been set up either before this method is called or
-        passed as an argument.
+    training_args.generation_max_length = 225
 
-        Args:
-            num_training_steps (int): The number of training steps to do.
-        """
-        
-        self.lr_scheduler = self.get_linear_schedule_with_warmup(
-            optimizer=self.optimizer if optimizer is None else optimizer,
-            num_warmup_steps=self.args.get_warmup_steps(num_training_steps),
-            num_training_steps=num_training_steps,
-        )
-        return self.lr_scheduler
+    trainer = LrRescheduleTrainer(
+        specified_epoch=0,
+        total_epoch=input_arg['epoch'],
+        model=model,
+        data_collator=data_collator,
+        args=training_args,
+        train_dataset=data_train,
+        # eval_dataset=data_test,
+        tokenizer=processor.feature_extractor,
+        callbacks=[SavePeftModelCallback],
+    )
+    model.config.use_cache = False  
 
-    def get_linear_schedule_with_warmup(self, optimizer, num_warmup_steps, num_training_steps, last_epoch=-1):
-        """
-        Create a schedule with a learning rate that decreases linearly from the initial lr set in the optimizer to 0, after
-        a warmup period during which it increases linearly from 0 to the initial lr set in the optimizer.
+    trainer.train()
 
-        Args:
-            optimizer ([`~torch.optim.Optimizer`]):
-                The optimizer for which to schedule the learning rate.
-            num_warmup_steps (`int`):
-                The number of steps for the warmup phase.
-            num_training_steps (`int`):
-                The total number of training steps.
-            last_epoch (`int`, *optional*, defaults to -1):
-               The index of the last epoch when resuming training. 
-
-        Return:
-            `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.
-        """
-
-        lr_lambda = partial(
-            self._get_linear_schedule_with_warmup_lr_lambda,
-            num_warmup_steps=num_warmup_steps,
-            num_training_steps=num_training_steps,
-        )
-        return LambdaLR(optimizer, lr_lambda, last_epoch)
-
-    def _get_linear_schedule_with_warmup_lr_lambda(self, current_step: int, *, num_warmup_steps: int, num_training_steps: int):
-        # The only difference
-        current_step += num_training_steps * self.specified_epoch
-        num_training_steps *= self.total_epoch
-
-        if current_step < num_warmup_steps:
-            return float(current_step) / float(max(1, num_warmup_steps))
-        return max(0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps)))
-
-def experiment(input_arg, model, processor, data_collator, data_train, data_test, time, output_dir, eval_only, corpus_wise):
-    if not eval_only:
-        training_args = Seq2SeqTrainingArguments(
-            do_eval=False,
-            output_dir=input_arg.get("output_dir", "."),
-            length_column_name="lengths",
-            group_by_length=input_arg["group_by_length"],
-            per_device_train_batch_size=int(input_arg["batch"]),
-            per_device_eval_batch_size=int(input_arg["batch"]),
-            gradient_accumulation_steps=int(input_arg["grad_accum"]),
-            eval_accumulation_steps=int(input_arg["grad_accum"]),
-            evaluation_strategy="no",
-            save_strategy="no",
-            ddp_find_unused_parameters=True,
-            resume_from_checkpoint=input_arg.get("checkpoint", False),
-            overwrite_output_dir=input_arg.get("overwrite_output_dir", False),
-            greater_is_better=False,
-            metric_for_best_model="cer",
-            num_train_epochs=input_arg.get("epoch", 5),
-            fp16=True,
-            logging_steps=input_arg.get("logging_steps", 10),
-            learning_rate=input_arg.get("learning_rate", 4.7e-5),
-            warmup_steps=input_arg.get("warmup_steps", 100),
-            save_total_limit=input_arg.get("save_total_limit", 3),
-            push_to_hub=False,
-            report_to="none",
-            weight_decay=input_arg.get("weight_decay", 0.02),
-            remove_unused_columns=False,
-            label_names=["labels"],
-        )
-
-        training_args.generation_max_length = 225
-
-        trainer = LrRescheduleTrainer(
-            specified_epoch=0,
-            total_epoch=input_arg['epoch'],
-            model=model,
-            data_collator=data_collator,
-            args=training_args,
-            train_dataset=data_train,
-            # eval_dataset=data_test,
-            tokenizer=processor.feature_extractor,
-            callbacks=[SavePeftModelCallback],
-        )
-        model.config.use_cache = False  
-
-        trainer.train()
     ###################
     #     Evaluate    #
     ###################
@@ -633,31 +722,18 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
     label_list = []
     pred_list = []
     pred_results = []
-    lang_id = list(model.generation_config.lang_to_id.values())
-    weight_vis=torch.zeros((len(lang_id))).to("cuda")
-    weight = None
-    if corpus_wise:
-        weight = torch.zeros((51865)).to("cuda")
-        for batch in eval_dataloader:
-            lang_distribution = model.detect_language_custom(input_features=batch["input_features"].to("cuda")).squeeze()
-            weight += lang_distribution
-        weight /= len(eval_dataloader)
-        weight_vis = weight[lang_id]
-
+    predictor = torch.load("weights_mlp_predictor/model.pt")
     for step, batch in enumerate(tqdm(eval_dataloader)):
         with torch.no_grad():
-            if weight != None:
-                lang_distribution = weight
-            else:
-                lang_distribution = model.detect_language_custom(input_features=batch["input_features"].to("cuda")).squeeze()
-                weight_vis += lang_distribution[lang_id]
+            lang_distribution = model.detect_language_custom(input_features=batch["input_features"].to("cuda")).squeeze()
             generated_tokens = (
                 model.generate(
                     input_features=batch["input_features"].to("cuda"),
                     max_new_tokens=255,
-                    decoder_input_ids=batch["labels"][:, :3].to("cuda"),
+                    decoder_input_ids=batch["labels"][:, :4].to("cuda"),
                     lang_distribution=lang_distribution,
-                    task="transcribe"
+                    task="transcribe",
+                    predictor=predictor
                 )
                 .cpu()
                 .numpy()
@@ -677,19 +753,6 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
             pred_str = (" ").join(pred_str)
         del generated_tokens, labels, batch
         gc.collect()
-    if not corpus_wise:
-        weight_vis /= len(eval_dataloader)
-    import matplotlib.pyplot as plt
-    keys = list(model.generation_config.lang_to_id.keys())
-    keys = [i.replace("<|", "").replace("|>", "") for i in keys]
-    values = weight_vis.squeeze().tolist()
-    plt.bar(range(len(keys)), values)
-    plt.margins(x=0)
-    plt.xlabel('Language')
-    plt.ylabel('Prob')
-    plt.title('Weight Distribution')
-    plt.xticks(range(len(keys)), keys, rotation=90, fontsize=5)
-    plt.savefig(f'{output_dir}/weight.png')
     nlp2.write_csv(pred_results, f'{output_dir}/pred.csv')
     cer = cer_cal(label_list, pred_list)
     wer = wer_cal(label_list, pred_list)
@@ -700,7 +763,6 @@ def experiment(input_arg, model, processor, data_collator, data_train, data_test
 
 
 def main(arg=None):
-    set_seed(42)
     input_arg, other_arg = parse_args(sys.argv[1:]) if arg is None else parse_args(arg)
     ############
     #  Config  #
@@ -712,9 +774,9 @@ def main(arg=None):
     input_arg["group_by_length"] = True
     input_arg["cache_dir"] = "~/.cache"
     dropout = input_arg.get("dropout", 0.0)
-
-    only_eval = input_arg.get("only_eval", False)
-    corpus_wise = input_arg.get("corpus_wise", False)
+    all = input_arg.get("all", False)
+    seed = input_arg.get("seed", 42)
+    set_seed(seed=seed)
     ############
     #  Model   #
     ############
@@ -723,13 +785,19 @@ def main(arg=None):
         input_arg["model_config"], task="transcribe", dropout=dropout, language=None
     )
     audio_feature_key = "input_ids"
-
-    data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor, audio_feature_key=audio_feature_key)
+    if all:
+        special_tokens_dict = {'additional_special_tokens': ['<|ast|>', '<|ceb|>', '<|ckb|>', '<|fil|>', '<|ful|>', '<|gle|>', '<|ibo|>', '<|kam|>', '<|kea|>', '<|kir|>', '<|lug|>', '<|luo|>', '<|msa|>', '<|mya|>', '<|nbl|>', '<|nso|>', '<|nya|>', '<|ori|>', '<|orm|>', '<|pan|>', '<|pus|>', '<|sot|>', '<|ssw|>', '<|tsn|>', '<|tso|>', '<|umb|>', '<|ven|>', '<|wol|>', '<|xho|>', '<|zul|>'] + processor.tokenizer.all_special_tokens}
+    else:
+        special_tokens_dict = {'additional_special_tokens': ['<|new|>'] + processor.tokenizer.all_special_tokens}
+    num_added_toks = processor.tokenizer.add_special_tokens(special_tokens_dict)
+    
 
     # load from base model
     model = Whisper_Modified.from_pretrained(input_arg["model_config"])
     config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
     model = get_peft_model(model, config)
+    model.resize_token_embeddings(len(processor.tokenizer))
+
     model = model.to("cuda")
     
     model.config.forced_decoder_ids = None
@@ -740,7 +808,6 @@ def main(arg=None):
     ############
     #  Dataset #
     ############
-    weight=None
     dataset = load_dataset(
         "csv",
         data_files=input_arg["custom_set_train"],
@@ -753,7 +820,7 @@ def main(arg=None):
         num_proc=1,
         fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
     )
-    data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor})
+    data_train = data_train.map(encode_dataset, fn_kwargs={"processor": processor, "all": all})
 
     dataset_test = load_dataset(
         "csv",
@@ -769,7 +836,9 @@ def main(arg=None):
         num_proc=1,
         fn_kwargs={"feature_extractor": processor.feature_extractor, "audio_feature_key": audio_feature_key},
     )
-    data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor})
+    data_test = data_test.map(encode_dataset, fn_kwargs={"processor": processor, "all": all})
+
+    data_collator = DataCollatorMLPpredictor(processor=processor, audio_feature_key=audio_feature_key, model=model, predictor=torch.load("weights_mlp_predictor/model.pt"))
 
     model = experiment(
         input_arg,
@@ -780,8 +849,7 @@ def main(arg=None):
         data_test,
         time,
         output_dir=input_arg["output_dir"],
-        eval_only=only_eval,
-        corpus_wise=corpus_wise,
+        all=all,
     )
 
 if __name__ == "__main__":

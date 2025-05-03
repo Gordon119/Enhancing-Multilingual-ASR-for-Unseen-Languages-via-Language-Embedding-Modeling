@@ -5,3 +5,8 @@ __pycache__/
 *.pyc
 .*
 *~
+weights_mlp_predictor_batch
+weights_mlp_predictor_naive
+ws_zero_shot_mlp.py
+ws_zero_shot_mlp.sh
+
