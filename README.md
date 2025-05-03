@@ -1,5 +1,5 @@
-# Enhancing Multilingual ASR for Unseen Languages via Language Embedding Modeling
-
+# Enhancing Multilingual ASR for Unseen Languages via Language Embedding Modeling (IEEE ICASSP 2025)
+Paper: https://ieeexplore.ieee.org/document/10890363
 ## Installation
 Use the exact version of the packages in the ``requirements.txt``.
 ```
@@ -11,9 +11,9 @@ The data format follows ml_superb. Each instance contains the path to the wav fi
 For example,
 ```
 path,text
-/tmp2/gordonzz/Whisper_Experiments/data/ml_superb/sixth_edition/fleurs/ast/wav/fleurs_ast_000067.wav,EN CUANTES A XAPóN XAPóN YERA UN PAíS-ISLLA IGUAL QUE GRAN BRETAñA
-/tmp2/gordonzz/Whisper_Experiments/data/ml_superb/sixth_edition/fleurs/ast/wav/fleurs_ast_000068.wav,DE FRACASAR LOS ALIAOS YE PROBABLE QU'ALEMAñA CONQUISTARE GRAN BRETAñA Y EL RESTU D'EUROPA
-/tmp2/gordonzz/Whisper_Experiments/data/ml_superb/sixth_edition/fleurs/ast/wav/fleurs_ast_000069.wav,LES IMáXENES D’INFRARROXU AMUESEN QUE LES VARIACIONES DE TEMPERATURA ENTE’L DíA Y LA NUECHE PRUEBEN QUE YE FáCIL QUE SEYAN CUEVES
+data/ml_superb/sixth_edition/fleurs/ast/wav/fleurs_ast_000067.wav,EN CUANTES A XAPóN XAPóN YERA UN PAíS-ISLLA IGUAL QUE GRAN BRETAñA
+data/ml_superb/sixth_edition/fleurs/ast/wav/fleurs_ast_000068.wav,DE FRACASAR LOS ALIAOS YE PROBABLE QU'ALEMAñA CONQUISTARE GRAN BRETAñA Y EL RESTU D'EUROPA
+data/ml_superb/sixth_edition/fleurs/ast/wav/fleurs_ast_000069.wav,LES IMáXENES D’INFRARROXU AMUESEN QUE LES VARIACIONES DE TEMPERATURA ENTE’L DíA Y LA NUECHE PRUEBEN QUE YE FáCIL QUE SEYAN CUEVES
 ...
 ```
 You can use the scripts ``gen_data_seen.py`` and ``gen_data.py`` in ``tools`` to generate Whisper-seen and Whisper-unseen data.

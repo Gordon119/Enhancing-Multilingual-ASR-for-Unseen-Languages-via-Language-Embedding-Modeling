@@ -26,3 +26,4 @@ wandb==0.16.2
 zhon==2.0.2
 accelerate
 peft==0.4.0
+iso639-lang

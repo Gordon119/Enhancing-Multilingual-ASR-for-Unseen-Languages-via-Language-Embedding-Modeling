@@ -105,7 +105,7 @@ LANGUAGES = {
     "yue": "cantonese",
 }
 for y, z in [("train", "transcript_1h_train"), ("val", "transcript_10min_dev"), ("test", "transcript_10min_test")]:
-    files = glob.glob(f"Whisper_Experiments/data/ml_superb/sixth_edition/*/*/{z}.txt")
+    files = glob.glob(f"data/ml_superb/sixth_edition/*/*/{z}.txt")
     dfs = {}
     res = []
     langs = []
@@ -136,11 +136,12 @@ for y, z in [("train", "transcript_1h_train"), ("val", "transcript_10min_dev"), 
         else:
             dfs[lang_code] = [df]
         from pathlib import Path
-        Path(lang_code).mkdir(parents=True, exist_ok=True)
+        Path(f"data/languages/{lang_code}").mkdir(parents=True, exist_ok=True)
+        
     for key, val in dfs.items():
         if len(val) > 1:
-            pd.concat(val).to_csv(f"{key}/{y}.csv", index=False)
+            pd.concat(val).to_csv(f"data/languages/{key}/{y}.csv", index=False)
         else:
-            val[0].to_csv(f"{key}/{y}.csv", index=False)
+            val[0].to_csv(f"data/languages/{key}/{y}.csv", index=False)
     print(dfs.keys())
     # print(skip)

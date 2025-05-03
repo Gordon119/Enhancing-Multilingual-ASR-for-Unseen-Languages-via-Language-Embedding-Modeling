@@ -207,7 +207,7 @@ def get_embedding(mask):
     input_arg["tokenize_config"] = f"openai/whisper-{size}"
     input_arg["model_config"] = f"openai/whisper-{size}"
     input_arg["group_by_length"] = True
-    input_arg["custom_set_train"] = f"Whisper_Experiments/data/ml_superb/sixth_edition/seen_languages/{mask}/train.csv"
+    input_arg["custom_set_train"] = f"data/ml_superb/sixth_edition/seen_languages/{mask}/train.csv"
 
     lang_name = Lang(mask).name.lower()
     model = Whisper_Modified.from_pretrained(input_arg["model_config"])
@@ -258,7 +258,7 @@ def prepare_data():
         train_x = list()
         train_y = list()
         import os
-        lang_names = os.listdir("Whisper_Experiments/data/ml_superb/sixth_edition/seen_languages")
+        lang_names = os.listdir("data/ml_superb/sixth_edition/seen_languages")
 
         cnt = 0
         for i in lang_names:
